@@ -8,6 +8,8 @@
 #include "Aftermath.h"
 #include "D3DX9MathUpgrade.h"
 #include "DxvkLoader.h"
+#include "RemixBridge.h"
+#include "RemixNativeRender.h"
 #include "Feature.h"
 #include "Globals.h"
 #include "Menu.h"
@@ -283,6 +285,77 @@ namespace GrassExtensions
 		{
 			func(shader, pass, renderFlags);
 			LegacyGraphicsCompatibility::BindLegacyGrassPerGeometryToPixelShader();
+			if (RemixBridge::SuppressWorldThisFrame() || RemixBridge::CapturingReferencePairThisFrame()) {
+				// Audit CPU-authored state, not the stale D3D11 bindings left by
+				// suppressed world draws. Different grass passes may use different state.
+				static std::unordered_set<uint64_t> auditedGrassState;
+				const auto stateKey = reinterpret_cast<uint64_t>(pass->geometry) ^ (uint64_t(pass->passEnum) << 32);
+				if (auditedGrassState.size() < 128 && auditedGrassState.insert(stateKey).second) {
+					const auto& native = globals::game::shadowState->GetRuntimeData();
+					const auto* alpha = pass->geometry->GetGeometryRuntimeData().alphaProperty.get();
+					logger::info("[RemixScene.grass.alpha] '{}' pass={:X} flags={:X} nativeBlend={} coverage={} write={} test={} ref={} extra={} nifFlags={:X} nifRef={}",
+						pass->geometry->name.c_str(), pass->passEnum, renderFlags, native.alphaBlendMode,
+						native.alphaBlendAlphaToCoverage, native.alphaBlendWriteMode, native.alphaTestEnabled,
+							native.alphaTestRef, native.alphaBlendModeExtra, alpha ? alpha->alphaFlags : 0, alpha ? alpha->alphaThreshold : 0);
+					using GrassRasterTable = ID3D11RasterizerState* [2][3][12][2];
+					static const auto* rasterTable = reinterpret_cast<const GrassRasterTable*>(REL::RelocationID(524748, 411363).address());
+					if (native.rasterStateFillMode < 2 && native.rasterStateCullMode < 3 && native.rasterStateDepthBiasMode < 12 && native.rasterStateScissorMode < 2) {
+						if (auto* authoredRaster = (*rasterTable)[native.rasterStateFillMode][native.rasterStateCullMode][native.rasterStateDepthBiasMode][native.rasterStateScissorMode]) {
+							D3D11_RASTERIZER_DESC desc{};
+							authoredRaster->GetDesc(&desc);
+							logger::info("[RemixScene.grass.raster] '{}' pass={:X} mode={} bias={} clamp={} slope={} frontCCW={} cull={} samplerAddress={} samplerFilter={}",
+								pass->geometry->name.c_str(), pass->passEnum, native.rasterStateDepthBiasMode,
+								desc.DepthBias, desc.DepthBiasClamp, desc.SlopeScaledDepthBias, desc.FrontCounterClockwise, static_cast<int>(desc.CullMode),
+								native.PSTextureAddressMode[0].underlying(), native.PSTextureFilterMode[0].underlying());
+							logger::info("[RemixScene.grass.viewport] '{}' pass={:X} xy=({},{}) size=({},{}) depth=({},{})",
+								pass->geometry->name.c_str(), pass->passEnum, native.viewPort.TopLeftX, native.viewPort.TopLeftY,
+								native.viewPort.Width, native.viewPort.Height, native.viewPort.MinDepth, native.viewPort.MaxDepth);
+						}
+					}
+					using GrassBlendTable = ID3D11BlendState* [7][2][13][2];
+					static const auto* blendTable = reinterpret_cast<const GrassBlendTable*>(REL::RelocationID(524749, 411364).address());
+					if (native.alphaBlendMode < 7 && native.alphaBlendAlphaToCoverage < 2 && native.alphaBlendWriteMode < 13 && native.alphaBlendModeExtra < 2) {
+						if (auto* authoredBlend = (*blendTable)[native.alphaBlendMode][native.alphaBlendAlphaToCoverage][native.alphaBlendWriteMode][native.alphaBlendModeExtra]) {
+							D3D11_BLEND_DESC desc{};
+							authoredBlend->GetDesc(&desc);
+							logger::info("[RemixScene.grass.alpha] authored blend enabled={} src={} dst={} op={} coverage={}",
+								desc.RenderTarget[0].BlendEnable, static_cast<int>(desc.RenderTarget[0].SrcBlend),
+								static_cast<int>(desc.RenderTarget[0].DestBlend), static_cast<int>(desc.RenderTarget[0].BlendOp), desc.AlphaToCoverageEnable);
+						}
+					}
+				}
+				const auto* vertexShader = globals::game::shadowState->GetRuntimeData().currentVertexShader;
+				if (vertexShader) {
+					const auto& constants = vertexShader->constantBuffers[2];
+					const int offset = vertexShader->constantTable[13]; // Native ScaleMask
+					if (constants.data && constants.buffer && offset >= 0) {
+						REX::W32::D3D11_BUFFER_DESC desc{};
+						constants.buffer->GetDesc(&desc);
+						// Metadata only; independent game-code hooks still suppress
+						// native rendering. Read shader-table offsets, not a guessed CB layout.
+						const int windOffset = vertexShader->constantTable[5];
+						const int timerOffset = vertexShader->constantTable[6];
+						const int previousTimerOffset = vertexShader->constantTable[8];
+						if (windOffset >= 0 && timerOffset >= 0 && previousTimerOffset >= 0 &&
+							(size_t(windOffset) + 3) * sizeof(float) <= desc.byteWidth &&
+							(size_t(timerOffset) + 1) * sizeof(float) <= desc.byteWidth &&
+							(size_t(previousTimerOffset) + 1) * sizeof(float) <= desc.byteWidth) {
+							const auto* values = static_cast<const float*>(constants.data);
+							RE::NiPoint3 wind;
+							std::memcpy(&wind, values + windOffset, sizeof(wind));
+							if (std::isfinite(wind.x) && std::isfinite(wind.y) && std::isfinite(wind.z) &&
+								std::isfinite(values[timerOffset]) && std::isfinite(values[previousTimerOffset]))
+								RemixBridge::CaptureGrassWind(pass->geometry, wind, values[timerOffset], values[previousTimerOffset]);
+						}
+						if ((size_t(offset) + 3) * sizeof(float) <= desc.byteWidth) {
+							RE::NiPoint3 scaleMask;
+							std::memcpy(&scaleMask, static_cast<const float*>(constants.data) + offset, sizeof(scaleMask));
+							if (std::isfinite(scaleMask.x) && std::isfinite(scaleMask.y) && std::isfinite(scaleMask.z))
+								RemixBridge::CaptureGeometry(pass->geometry, &scaleMask);
+						}
+					}
+				}
+			}
 
 			auto state = globals::state;
 
@@ -387,6 +460,8 @@ struct IDXGISwapChain_Present
 {
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
+		RemixBridge::BeforePresent();
+		globals::features::screenshotFeature.ProcessSequenceCapture();
 		globals::state->Reset();
 
 		// DLSS-G on Vulkan requires SyncInterval 0.
@@ -645,6 +720,13 @@ struct BSInputDeviceManager_PollInputDevices
 			Streamline::GetSingleton()->SetPCLMarker(Streamline::PclMarker::SimulationStart);
 		}
 
+		// Remix receives the original DirectInput stream before it is consumed by either UI.
+		if (RemixBridge::ProcessMenuInput(a_events)) {
+			constexpr RE::InputEvent* const dummy[] = { nullptr };
+			func(a_dispatcher, dummy);
+			return;
+		}
+
 		bool blockedDevice = true;
 
 		auto menu = globals::menu;
@@ -737,6 +819,7 @@ namespace Hooks
 			// Only update atomics from the window thread; SL/FFX calls stay on the render thread.
 			switch (a_msg) {
 			case WM_ACTIVATEAPP:
+				RemixBridge::SetMenuFocus(a_wParam != FALSE);
 				Upscaling::NotifyWindowFocus(a_wParam != FALSE);
 				break;
 			case WM_ACTIVATE:
@@ -1150,6 +1233,7 @@ namespace Hooks
 	 */
 	void Install()
 	{
+		RemixNativeRender::Install();
 		D3DX9MathUpgrade::Install();
 
 		logger::info("Hooking BSImageSpace::Init::IBLF");
@@ -1173,7 +1257,7 @@ namespace Hooks
 
 		// CS_NO_PASS_PREFETCH=1: A/B escape hatch to run without the next-pass prefetch detour.
 		char noPassPrefetch[2] = {};
-		if (!(GetEnvironmentVariableA("CS_NO_PASS_PREFETCH", noPassPrefetch, sizeof(noPassPrefetch)) && noPassPrefetch[0] == '1')) {
+		if (RemixBridge::IsRequested() || !(GetEnvironmentVariableA("CS_NO_PASS_PREFETCH", noPassPrefetch, sizeof(noPassPrefetch)) && noPassPrefetch[0] == '1')) {
 			logger::info("Hooking BSBatchRenderer::RenderPassImmediately (next-pass prefetch)");
 			stl::detour_thunk<BSBatchRenderer_RenderPassImmediately1>(REL::RelocationID(100854, 107644));
 		} else {

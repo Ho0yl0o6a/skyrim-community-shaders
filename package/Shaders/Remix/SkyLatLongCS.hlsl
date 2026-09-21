@@ -50,11 +50,5 @@ float3 GammaToLinear(float3 color)
 
 	const float3 sky = SkyCubemap.SampleLevel(LinearSampler, direction, 0).rgb;
 
-#ifdef SKY_PROBE_CONSTANT
-	// Diagnostic: proves the dome reaches the screen independently of whether
-	// the game's cubemap holds anything. Blue above the horizon, red below.
-	LatLong[threadId.xy] = float4(direction.z > 0 ? float3(0.2, 0.4, 1.0) : float3(1.0, 0.2, 0.2), 1.0);
-#else
 	LatLong[threadId.xy] = float4(GammaToLinear(sky), 1.0);
-#endif
 }

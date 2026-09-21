@@ -43,6 +43,49 @@ static LONG CALLBACK CommunityShadersCrashDump(EXCEPTION_POINTERS* a_exception)
 
 	logger::critical("[CRASH] exception {:#x} at {} - writing CommunityShaders.dmp", code,
 		fmt::ptr(a_exception->ExceptionRecord->ExceptionAddress));
+	// A raw address is useless when the fault is an indirect call through freed
+	// memory: what matters is which module called it. Each frame is reported as
+	// module+offset so it can be matched against a map file or a disassembler
+	// without needing a symbol server at the time of the crash.
+	{
+		auto describe = [](void* address) {
+			HMODULE module = nullptr;
+			wchar_t path[MAX_PATH]{};
+			if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCWSTR>(address), &module) &&
+				GetModuleFileNameW(module, path, MAX_PATH)) {
+				std::filesystem::path file{ path };
+				return std::format("{}+{:#x}", file.filename().string(),
+					reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module));
+			}
+			return std::format("{}", fmt::ptr(address));
+		};
+		logger::critical("[CRASH] faulting instruction {}", describe(a_exception->ExceptionRecord->ExceptionAddress));
+		void* frames[32]{};
+		const auto captured = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+		for (USHORT i = 0; i < captured; ++i)
+			logger::critical("[CRASH]   frame {:02} {}", i, describe(frames[i]));
+		auto* context = a_exception->ContextRecord;
+		if (context) {
+			logger::critical("[CRASH] rip {} rsp {:#x} rcx {:#x} rdx {:#x}", describe(reinterpret_cast<void*>(context->Rip)),
+				context->Rsp, context->Rcx, context->Rdx);
+			// The return addresses on the faulting stack survive an indirect call
+			// through garbage, so they name the caller the backtrace above cannot.
+			auto* stack = reinterpret_cast<void**>(context->Rsp);
+			uint32_t reported = 0;
+			for (uint32_t i = 0; i < 128 && reported < 12; ++i) {
+				void* candidate = nullptr;
+				if (!ReadProcessMemory(GetCurrentProcess(), stack + i, &candidate, sizeof(candidate), nullptr))
+					break;
+				HMODULE module = nullptr;
+				if (candidate && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+						reinterpret_cast<LPCWSTR>(candidate), &module)) {
+					logger::critical("[CRASH]   stack[{:03}] {}", i, describe(candidate));
+					++reported;
+				}
+			}
+		}
+	}
 	spdlog::default_logger()->flush();
 
 	wchar_t path[MAX_PATH]{};
@@ -87,9 +130,20 @@ void InitializeLog([[maybe_unused]] spdlog::level::level_enum a_level = spdlog::
 
 	auto log = std::make_shared<spdlog::logger>("global log"s, std::move(sink));
 	log->set_level(level);
-	log->flush_on(spdlog::level::info);
+	// Flushing every info line writes through to disk on the render thread, and
+	// the per-frame diagnostics emit a burst of twenty-odd lines once every 120
+	// frames. That was suspected of putting a hitch on one frame in a hundred and
+	// twenty; at a parked camera the frame-period tail did not move for it
+	// (p99 24-30 ms either way, median 13.6), so it is kept as ordinary hygiene
+	// rather than as a fix for anything. The tail is GPU-side: the median period
+	// is 13.6 ms of which 10.3 ms is already spent waiting on the GPU.
+	// Warnings and errors are rare and worth writing through; the periodic flush
+	// below bounds how much of an ordinary log can be lost, and the crash handler
+	// flushes explicitly.
+	log->flush_on(spdlog::level::warn);
 
 	spdlog::set_default_logger(std::move(log));
+	spdlog::flush_every(std::chrono::seconds(2));
 	spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%s:%#] %v");
 }
 

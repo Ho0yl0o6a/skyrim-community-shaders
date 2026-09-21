@@ -20,7 +20,17 @@ namespace RemixSky
 	// Resolves this frame's sky and hands it to Remix. Does nothing where the
 	// game shows no sky, which leaves Remix's dome inactive and interiors dark
 	// until their own lights arrive.
-	void Submit();
+	bool Submit();
+
+	// Keeps LOD terrain, LOD objects and LOD trees out of the reflections
+	// cubemap while Remix owns the world, so the dome light receives sky and
+	// nothing else. Pass true to hand the player's own values back.
+	//
+	// TESWaterReflections::Update reads these settings fresh on every update
+	// and each one gates a single scene-graph root submission, so changing the
+	// value is enough; no game code is patched. See
+	// docs/development/remix-native-render-audit.md.
+	void SetReflectionLodEnabled(bool enabled);
 
 	// Drops the resolved image and the shader. The textures the game owns are
 	// not touched.

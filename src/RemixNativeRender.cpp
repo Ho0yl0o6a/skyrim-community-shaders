@@ -1,10 +1,14 @@
 #include "RemixNativeRender.h"
+#include "State.h"
 #include "RemixBridge.h"
 #include "RemixMaterial.h"
+#include "RemixScene.h"
+#include "RemixSky.h"
 #include <RE/N/NiParticleSystem.h>
 #include <RE/N/NiPSysData.h>
 
 #include <atomic>
+#include <chrono>
 #include <tuple>
 
 namespace RemixNativeRender
@@ -18,12 +22,94 @@ namespace RemixNativeRender
 		std::atomic<uint32_t> draws{ 0 }, dispatches{ 0 };
 		uint32_t frames = 0;
 		bool installed = false;
+		RE::BSGraphics::ViewData worldEye{};
+		RE::NiPoint3 worldOrigin{};
+		RE::NiPoint3 worldCameraPosition{}, worldPlayerPosition{};
+		uint32_t worldCameraFrame = 0;
+		bool worldCameraValid = false;
+		RE::BSGraphics::ViewData viewModelEye{};
+		RE::NiPoint3 viewModelOrigin{}, viewModelRootPosition{};
+		RE::NiPointer<RE::NiAVObject> viewModelRoot;
+		uint32_t viewModelCameraFrame = 0;
+
+		struct ViewModelCameraCall
+		{
+			static void thunk(RE::BSGraphics::State* state, const RE::NiCamera* camera, uint32_t flags)
+			{
+				func(state, camera, flags);
+				const auto* nativeCamera = *reinterpret_cast<RE::NiCamera**>(REL::Module::get().base() + 0x3436220);
+				if (!camera || camera != nativeCamera)
+					return;
+				auto* player = RE::PlayerCharacter::GetSingleton();
+				auto* root = player ? player->Get3D(true) : nullptr;
+				if (!root || root == player->Get3D(false))
+					return;
+				auto& shadow = globals::game::shadowState->GetRuntimeData();
+				viewModelEye = shadow.cameraData.getEye();
+				viewModelOrigin = shadow.posAdjust.getEye();
+				viewModelRoot.reset(root);
+				viewModelRootPosition = root->world.translate;
+				viewModelCameraFrame = globals::state->frameCount;
+				RemixScene::CaptureViewModelPose();
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		// Startup-only paired-buffer diagnostic. Preserve the native cache key
+		// and all camera bookkeeping, but generate this world's projection without
+		// sample jitter. Both state pairs are restored before other cameras run.
+		struct MatchedWorldCameraCacheCall
+		{
+			static void thunk(RE::BSGraphics::State* state, const RE::NiCamera* camera, bool useJitter, bool alternate)
+			{
+				auto* jitter = reinterpret_cast<std::byte*>(state) + 0x44;
+				std::array<float, 4> originalJitter;
+				std::memcpy(originalJitter.data(), jitter, sizeof(originalJitter));
+				const std::array<float, 4> zeroJitter{};
+				std::memcpy(jitter, zeroJitter.data(), sizeof(zeroJitter));
+				func(state, camera, useJitter, alternate);
+				std::memcpy(jitter, originalJitter.data(), sizeof(originalJitter));
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		struct WorldCameraCall
+		{
+			static void thunk(RE::BSGraphics::State* state, const RE::NiCamera* camera, uint32_t flags)
+			{
+				func(state, camera, flags);
+				// Audited unconditional call at Main::Draw+0x3d4: RSI is the
+				// WorldRootCamera, R8D=1. Snapshot the resulting view AND origin
+				// before first-person setup overwrites the shared shadow state.
+				if (camera == RE::Main::WorldRootCamera()) {
+					auto& shadow = globals::game::shadowState->GetRuntimeData();
+					worldEye = shadow.cameraData.getEye();
+					worldOrigin = shadow.posAdjust.getEye();
+					worldCameraPosition = camera->world.translate;
+					const auto* player = RE::PlayerCharacter::GetSingleton();
+					worldPlayerPosition = player ? player->GetPosition() : RE::NiPoint3{};
+					// CS owns this counter and advances it once at Present, after
+					// world capture and UI submission. The direct CommonLib field
+					// at State+0x4c is not a frame counter on 1.7.99 (live values
+					// alternate between float-like bit patterns).
+					worldCameraFrame = globals::state->frameCount;
+					worldCameraValid = true;
+				}
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
 
 		// The game draws its own sky into the reflections cubemap, one face per
 		// frame, and that image is what Remix is given as its sky. Suppressing
 		// the world would take those draws with it and leave nothing to hand
-		// over, so this one pass is allowed through. It renders into the game's
-		// own cube, never the screen, so nothing of it reaches the display.
+		// over, so sky draws into that cube are allowed through. They are the
+		// only geometry the game still renders for itself, and they land in the
+		// game's own cube, never on the screen.
+		//
+		// The pass is let through whole rather than filtered by shader: the game
+		// no longer submits its LOD terrain, object and tree roots into that cube
+		// at all, because RemixSky::SetReflectionLodEnabled clears the settings
+		// that gate them. Nothing is left to draw there but the sky.
 		bool RenderingSkyCubemap()
 		{
 			auto* shadowState = globals::game::shadowState;
@@ -40,8 +126,41 @@ namespace RemixNativeRender
 		{
 			static void thunk(RE::Main* main, uint32_t imageSpaceTarget)
 			{
+				worldCameraValid = false;
+				viewModelRoot.reset();
 				draws = dispatches = 0;
 				suppress = RemixBridge::SuppressWorld();
+				// Reapply before this frame can populate the reflection cubemap.
+				RemixSky::SetReflectionLodEnabled(!suppress.load(std::memory_order_relaxed));
+				// Every pass inside this world render reads the same answer; see
+				// RemixBridge::SuppressWorldThisFrame.
+				suppress = RemixBridge::LatchSuppressWorld(suppress.load(std::memory_order_relaxed));
+				// The draws below are suppressed, but everything that leads to
+				// them -- scenegraph traversal, culling, batch building, shader
+				// and constant setup -- still runs. This measures what that
+				// costs, because the frame is CPU bound outside the plugin's
+				// own gather/capture/submit and this is the prime suspect.
+				const auto worldStart = std::chrono::steady_clock::now();
+				struct Timed
+				{
+					std::chrono::steady_clock::time_point start;
+					~Timed()
+					{
+						static double total = 0.0;
+						static uint32_t samples = 0;
+						total += std::chrono::duration<double, std::milli>(
+							std::chrono::steady_clock::now() - start).count();
+						if (++samples % 120 == 0) {
+							logger::info("[RemixNativeRender] suppressed world render costs {:.3f} ms/frame (mean of 120)",
+								total / 120.0);
+							total = 0.0;
+						}
+					}
+				} timed { worldStart };
+				// The game's light lists are the render thread's own only inside
+				// the world frame. Capturing here rather than at submit time is
+				// what keeps a cell load from tearing them out mid-walk.
+				RemixScene::CaptureSceneLights();
 				func(main, imageSpaceTarget);
 				// Do not end suppression here: the caller still has world image-
 				// space work before it enters the separately hooked UI call.
@@ -89,7 +208,7 @@ namespace RemixNativeRender
 		{
 			static uintptr_t thunk(uintptr_t effect, uintptr_t arg2, uintptr_t arg3)
 			{
-				if (!RemixBridge::SuppressWorld()) return func(effect, arg2, arg3);
+				if (!RemixBridge::SuppressWorldThisFrame()) return func(effect, arg2, arg3);
 				const auto* bytes = reinterpret_cast<const uint8_t*>(effect);
 				const auto source = *reinterpret_cast<RE::BSGraphics::Texture* const*>(bytes + 0x10);
 				const auto destination = *reinterpret_cast<RE::BSGraphics::Texture* const*>(bytes + 0x18);
@@ -133,6 +252,10 @@ namespace RemixNativeRender
 			static inline decltype(thunk)* func;
 		};
 
+		// Measures one call site inside Main::Draw without changing behaviour.
+		// The suppressed world frame costs about 4 ms with every draw already
+		// stubbed, and that time has to be attributed before any of it can be
+		// cut; the phases are named in docs/development/remix-performance.md.
 		void Verify(uintptr_t rva, std::initializer_list<uint8_t> bytes)
 		{
 			const auto address = REL::Module::get().base() + rva;
@@ -158,6 +281,41 @@ namespace RemixNativeRender
 		}
 	}
 
+	bool ReadWorldCamera(RE::BSGraphics::ViewData& eye, RE::NiPoint3& origin)
+	{
+		// Both producer and consumer run on the render thread. Never substitute
+		// a previous frame or an unrelated pass when the world call is absent.
+		if (!worldCameraValid || worldCameraFrame != globals::state->frameCount)
+			return false;
+		eye = worldEye;
+		origin = worldOrigin;
+		return true;
+	}
+
+	bool ReadWorldCameraPositions(RE::NiPoint3& camera, RE::NiPoint3& player)
+	{
+		if (!worldCameraValid || worldCameraFrame != globals::state->frameCount) return false;
+		camera = worldCameraPosition;
+		player = worldPlayerPosition;
+		return true;
+	}
+
+	bool ReadViewModelCamera(RE::BSGraphics::ViewData& eye, RE::NiPoint3& origin, RE::NiPoint3* modelTranslation)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!viewModelRoot || viewModelCameraFrame != globals::state->frameCount ||
+			!player || player->Get3D(true) != viewModelRoot.get())
+			return false;
+		eye = viewModelEye;
+		// Main::Draw restores the recursively rebased model after its pass.
+		// Move the captured camera by the same translation before importing
+		// those restored transforms and bones. See remix-first-person.md.
+		const auto translation = viewModelRoot->world.translate - viewModelRootPosition;
+		origin = viewModelOrigin + translation;
+		if (modelTranslation) *modelTranslation = translation;
+		return true;
+	}
+
 	int32_t ReadSwitchIndex(const RE::NiSwitchNode* node)
 	{
 		if (!node || REL::Module::get().version() != REL::Version{ 1, 7, 99, 0 })
@@ -177,6 +335,19 @@ namespace RemixNativeRender
 		// BSDistantTreeShader::SetupTechnique (0x1558d70) binds its renderer
 		// texture's SRV to PS slot 0. The property-local slot at +0x90 is empty.
 		return *reinterpret_cast<RE::NiSourceTexture**>(REL::Module::get().base() + 0x3486718);
+	}
+
+	std::array<RE::NiAVObject*, 4> ReadExteriorLodRoots()
+	{
+		if (!installed || REL::Module::get().version() != REL::Version{ 1, 7, 99, 0 })
+			return {};
+		const auto base = REL::Module::get().base();
+		// Audited terrain attach/detach and SetCullState use these owning globals.
+		// See .research/scene-membership-native-audit.json.
+		return { *reinterpret_cast<RE::NiAVObject**>(base + 0x3203520),
+			*reinterpret_cast<RE::NiAVObject**>(base + 0x3203528),
+			*reinterpret_cast<RE::NiAVObject**>(base + 0x3203538),
+			*reinterpret_cast<RE::NiAVObject**>(base + 0x3203540) };
 	}
 
 	WaterGlobals ReadWaterGlobals()
@@ -206,6 +377,9 @@ namespace RemixNativeRender
 		// caller, this is invoked for retained emitters irrespective of frustum.
 		const uint32_t count = std::min<uint32_t>(inputs.numVertices, 2048);
 		vertices.resize(count * 4);
+		// An emitter between bursts reports zero live particles. That is not a
+		// failure to read it, and the caller distinguishes the two so a churn
+		// report does not blame the import for the game's own spawn cadence.
 		if (!count) return true;
 		if (!inputs.positions || !inputs.radii || !inputs.sizes ||
 			((inputs.unk88 || inputs.unk89) && !data->GetPSysRuntimeData().particleInfo)) return false;
@@ -256,6 +430,11 @@ namespace RemixNativeRender
 			return;
 		if (REL::Module::get().version() != REL::Version{ 1, 7, 99, 0 })
 			stl::report_and_fail("The independently audited Remix game hooks currently require Skyrim 1.7.99.0.");
+		char test[8]{}, match[8]{};
+		const bool matchCaptureSamples = GetEnvironmentVariableA("CS_REMIX_TEST", test, sizeof(test)) == 1 && test[0] == '1' &&
+			GetEnvironmentVariableA("CS_REMIX_MATCH_CAPTURE_SAMPLES", match, sizeof(match)) == 1 && match[0] == '1';
+		if (matchCaptureSamples)
+			VerifyBranch(0x656ee4, 0x101c8f0, 0xe8);
 		// Validate every site before changing any game code. These are not the
 		// existing CS pass/dirty-state/Main::Draw/compute/UI entry hooks.
 		Verify(0x656ab0, { 0x40, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x40 });
@@ -271,6 +450,8 @@ namespace RemixNativeRender
 		VerifyBranch(0x1589adc, 0x100f280, 0xe9);  // tail jump, not CALL
 		VerifyBranch(0x657912, 0x1540b50, 0xe8);
 		VerifyBranch(0x6566c1, 0x116aa20, 0xe8);
+		VerifyBranch(0x656fd4, 0x101c400, 0xe8);
+		VerifyBranch(0x1514ff7, 0x101c400, 0xe8);
 		VerifyBranch(0x6e4b60, 0x116aa20, 0xe8);
 		if (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR)
 			stl::report_and_fail("Failed to begin independent Remix game-code hook transaction.");
@@ -289,8 +470,14 @@ namespace RemixNativeRender
 		if (DetourTransactionCommit() != NO_ERROR)
 			stl::report_and_fail("Failed to commit independent Remix game-code hooks.");
 		const auto base = REL::Module::get().base();
+		if (matchCaptureSamples) {
+			stl::write_thunk_call<MatchedWorldCameraCacheCall>(base + 0x656ee4);
+			logger::info("[RemixNative] paired-buffer diagnostic: world camera cache generated without jitter");
+		}
 		stl::write_thunk_jmp<ComputeCall>(base + 0x1589adc);
 		stl::write_thunk_call<WaterFlowCopy>(base + 0x657912);
+		stl::write_thunk_call<WorldCameraCall>(base + 0x656fd4);
+		stl::write_thunk_call<ViewModelCameraCall>(base + 0x1514ff7);
 		stl::write_thunk_call<InterfaceCall<0x6566c1>>(base + 0x6566c1);
 		stl::write_thunk_call<InterfaceCall<0x6e4b60>>(base + 0x6e4b60);
 		installed = true;

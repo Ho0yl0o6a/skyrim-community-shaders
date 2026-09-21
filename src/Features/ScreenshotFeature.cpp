@@ -12,6 +12,8 @@
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "RemixBridge.h"
+#include "State.h"
 #include "Utils/FileSystem.h"
 
 #define I18N_KEY_PREFIX "feature.screenshot."
@@ -24,6 +26,7 @@
 
 #include <format>
 #include <functional>
+#include <fstream>
 #include <malloc.h>
 
 namespace
@@ -44,11 +47,12 @@ namespace
 	struct D3D11MultithreadGuard
 	{
 		winrt::com_ptr<REX::W32::ID3D11Multithread> multithread;
+		BOOL wasProtected = FALSE;
 
 		explicit D3D11MultithreadGuard(ID3D11DeviceContext* context)
 		{
 			if (context && SUCCEEDED(context->QueryInterface(multithread.put()))) {
-				multithread->SetMultithreadProtected(TRUE);
+				wasProtected = multithread->SetMultithreadProtected(TRUE);
 				multithread->Enter();
 			}
 		}
@@ -57,7 +61,7 @@ namespace
 		{
 			if (multithread) {
 				multithread->Leave();
-				multithread->SetMultithreadProtected(FALSE);
+				multithread->SetMultithreadProtected(wasProtected);
 			}
 		}
 	};
@@ -337,6 +341,13 @@ namespace
 	{
 		return globals::features::hdrDisplay.loaded &&
 		       globals::features::hdrDisplay.IsHDREnabledForFrame();
+	}
+
+	bool HasSequenceWorld()
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		return player && player->GetParentCell() &&
+			!globals::state->IsMainOrLoadingMenuOpen(RE::UI::GetSingleton()) && !IsFlatHdrScreenshotCapture();
 	}
 
 	// Picks the capture source:
@@ -760,6 +771,45 @@ void ScreenshotFeature::ProcessCaptureRequest()
 	}
 }
 
+bool ScreenshotFeature::RequestSequence(uint32_t frames)
+{
+	if (!RemixBridge::IsRequested() || frames < 2 || frames > 64 ||
+		!HasSequenceWorld())
+		return false;
+	uint32_t idle = 0;
+	if (!sequencePending.compare_exchange_strong(idle, frames))
+		return false;
+	sequenceRequested.store(frames);
+	return true;
+}
+
+void ScreenshotFeature::ProcessSequenceCapture()
+{
+	if (const auto requested = sequenceRequested.exchange(0)) {
+		sequenceCount = sequenceRemaining = requested;
+		sequenceLastFrame = UINT32_MAX;
+		sequenceDirectory = BuildScreenshotPath(screenshotPath, true).replace_extension();
+		sequenceDirectory += std::format("-sequence-{}", GetCurrentProcessId());
+		sequenceShots.clear();
+	}
+	if (!sequenceRemaining)
+		return;
+	const auto frame = globals::state->frameCountAtomic.load();
+	if (frame == sequenceLastFrame)
+		return;
+	sequenceLastFrame = frame;
+	if (!CaptureFrame(true)) {
+		logger::error("[Remix.sequence] Failed frame {} index {}", frame, sequenceCount - sequenceRemaining);
+		--sequencePending;
+	}
+	if (!--sequenceRemaining) {
+		// Defer CPU mapping/encoding until every consecutive GPU copy is queued.
+		for (auto& shot : sequenceShots)
+			EnqueueScreenshot(std::move(shot));
+		sequenceShots.clear();
+	}
+}
+
 void ScreenshotFeature::EnsureWorkerThread()
 {
 	if (screenshotWorker.joinable()) {
@@ -821,6 +871,8 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 				screenshot.height,
 				image)) {
 			logger::error("Failed to map screenshot staging texture.");
+			if (screenshot.sequence)
+				--sequencePending;
 			continue;
 		}
 
@@ -841,6 +893,22 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 
 		if (saveOk) {
 			CopySavedPathToClipboard(screenshot.copyToClipboard, screenshot.outputPath);
+		}
+		if (screenshot.sequence) {
+			const json metadata = { { "saved", saveOk }, { "frame", screenshot.frame },
+				{ "index", screenshot.index }, { "count", screenshot.count },
+				{ "pid", GetCurrentProcessId() }, { "captureTimeUs", screenshot.captureTimeUs },
+				{ "width", screenshot.width }, { "height", screenshot.height },
+				{ "format", static_cast<uint32_t>(screenshot.format) },
+				{ "source", "kFRAMEBUFFER before Present/State::Reset; not WSI display capture" } };
+			std::ofstream sidecar(screenshot.outputPath.string() + ".json");
+			sidecar << metadata.dump(2);
+			if (!sidecar)
+				logger::error("[Remix.sequence] Metadata write failed: {}", screenshot.outputPath.string());
+			logger::info("[Remix.sequence] saved={} frame={} index={} path={}", saveOk,
+				screenshot.frame, screenshot.index, screenshot.outputPath.string());
+			--sequencePending;
+			continue;
 		}
 
 		if (!saveOk) {
@@ -864,11 +932,18 @@ void ScreenshotFeature::ShowInGameNotification(std::string message)
 
 void ScreenshotFeature::Capture()
 {
+	CaptureFrame(false);
+}
+
+bool ScreenshotFeature::CaptureFrame(bool sequence)
+{
 	auto device = globals::d3d::device;
 	auto context = globals::d3d::context;
 
 	if (!device || !context)
-		return;
+		return false;
+	if (sequence && !HasSequenceWorld())
+		return false;
 
 	winrt::com_ptr<ID3D11Texture2D> sourceTextureKeepAlive;
 	const auto src = SelectCaptureSource(sourceTextureKeepAlive, /*forCapture=*/true);
@@ -876,19 +951,22 @@ void ScreenshotFeature::Capture()
 
 	if (!src.texture) {
 		logger::error("Failed to acquire screenshot source texture ({}).", src.description);
-		return;
+		return false;
 	}
 	ID3D11Texture2D* sourceTexture = src.texture;
 
 	D3D11_TEXTURE2D_DESC srcDesc{};
 	sourceTexture->GetDesc(&srcDesc);
+	// Bound all retained staging textures to 512 MiB, even at larger resolutions.
+	if (sequence && uint64_t(srcDesc.Width) * srcDesc.Height * DirectX::BitsPerPixel(srcDesc.Format) / 8 * sequenceCount > 512ull * 1024 * 1024)
+		return false;
 
 	uint32_t copyX = 0;
 	uint32_t copyY = 0;
 	uint32_t copyW = srcDesc.Width;
 	uint32_t copyH = srcDesc.Height;
 
-	if (applyCropToScreenshot) {
+	if (applyCropToScreenshot && !sequence) {
 		auto region = subrect.GetPixelRegion(srcDesc.Width, srcDesc.Height);
 		copyX = region.x;
 		copyY = region.y;
@@ -911,7 +989,7 @@ void ScreenshotFeature::Capture()
 	winrt::com_ptr<ID3D11Texture2D> stagingTexture;
 	if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, stagingTexture.put()))) {
 		logger::error("Failed to create screenshot staging texture.");
-		return;
+		return false;
 	}
 
 	D3D11_BOX sourceRegion{};
@@ -929,10 +1007,10 @@ void ScreenshotFeature::Capture()
 	const bool flatHdrCapture = IsFlatHdrScreenshotCapture();
 	if (flatHdrCapture && !IsHdrCaptureFormat(srcDesc.Format)) {
 		logger::error("Unsupported HDR screenshot format: {}", static_cast<uint32_t>(srcDesc.Format));
-		return;
+		return false;
 	}
 	const bool saveAsHdrPng = flatHdrCapture && IsHdrCaptureFormat(srcDesc.Format);
-	const bool saveAsSdrPng = !saveAsHdrPng && sdrUsePng;
+	const bool saveAsSdrPng = !saveAsHdrPng && (sdrUsePng || sequence);
 
 	EnsureWorkerThread();
 	PendingScreenshot screenshot;
@@ -945,6 +1023,19 @@ void ScreenshotFeature::Capture()
 	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
 	screenshot.outputPath = BuildScreenshotPath(screenshotPath, saveAsHdrPng || saveAsSdrPng);
 	screenshot.copyToClipboard = copyToClipboard;
+	if (sequence) {
+		screenshot.sequence = true;
+		screenshot.copyToClipboard = false;
+		screenshot.frame = globals::state->frameCountAtomic.load();
+		screenshot.index = sequenceCount - sequenceRemaining;
+		screenshot.count = sequenceCount;
+		screenshot.captureTimeUs = std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+		screenshot.outputPath = sequenceDirectory / std::format("{:03}-frame-{}.png", screenshot.index, screenshot.frame);
+		sequenceShots.push_back(std::move(screenshot));
+		return true;
+	}
 	EnqueueScreenshot(std::move(screenshot));
+	return true;
 }
 #undef I18N_KEY_PREFIX

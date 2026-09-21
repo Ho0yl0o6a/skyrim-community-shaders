@@ -1,0 +1,2 @@
+[CSRemix.retainedAudit] frame=100 samples=1 violationFrames=0 draws=2 nodes=3 hostNodes=2 instances=3 badEntries=0 badOwners=0 badPrims=0 gcMarked=0 unowned=1 staleUnowned=0
+[CSRemix.retainedAudit] frame=101 samples=2 violationFrames=0 draws=2 nodes=3 hostNodes=2 instances=3 badEntries=0 badOwners=0 badPrims=0 gcMarked=0 unowned=1 staleUnowned=0

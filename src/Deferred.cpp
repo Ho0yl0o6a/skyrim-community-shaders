@@ -1,4 +1,5 @@
 #include "Deferred.h"
+#include "RemixBridge.h"
 
 #include <DDSTextureLoader.h>
 
@@ -297,6 +298,10 @@ void Deferred::StartDeferred()
 
 void Deferred::DeferredPasses()
 {
+	// Native batch preparation may run while independent game hooks suppress
+	// world submission; CS's direct compute compositor must also stay disabled.
+	if (RemixBridge::SuppressWorldThisFrame())
+		return;
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "Deferred");
 
@@ -431,6 +436,8 @@ void Deferred::EndDeferred()
 
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
+
+	RemixBridge::CaptureReferenceBuffers();
 
 	DeferredPasses();  // Perform deferred passes and composite forward buffers
 
@@ -641,7 +648,11 @@ ID3D11ComputeShader* Deferred::GetComputeMainCompositeInterior()
 
 void Deferred::Hooks::Main_RenderShadowMaps::thunk()
 {
-	func();
+	// The startup diagnostic keeps CPU batch preparation and cleanup alive;
+	// independent native draw/dispatch hooks still suppress GPU world submission.
+	if (RemixBridge::KeepNativePreparation() ||
+		(!RemixBridge::SuppressWorldThisFrame() && !RemixBridge::CapturingReferencePairThisFrame()))
+		func();
 	globals::deferred->EarlyPrepasses();
 };
 
@@ -650,7 +661,8 @@ void Deferred::Hooks::Main_RenderWorld::thunk(bool a1)
 	auto* const state = globals::state;
 	state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
 	state->inWorld = true;
-	func(a1);
+	if (RemixBridge::KeepNativePreparation() || !RemixBridge::SuppressWorldThisFrame())
+		func(a1);
 
 	state->inWorld = false;
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);

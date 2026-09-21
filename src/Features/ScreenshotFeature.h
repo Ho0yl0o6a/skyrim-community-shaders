@@ -9,6 +9,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 
 struct ScreenshotFeature : public Feature
 {
@@ -35,6 +36,8 @@ struct ScreenshotFeature : public Feature
 	void Capture();
 	/** @brief Checks for a pending capture request and executes Capture() if one is pending. Called after HDR Present processing. */
 	void ProcessCaptureRequest();
+	bool RequestSequence(uint32_t frames);
+	void ProcessSequenceCapture();
 	bool applyCropToScreenshot = true;
 
 	// Settings
@@ -60,7 +63,20 @@ private:
 		bool saveAsSdrPng = false;
 		int hdrPngBitDepth = 11;
 		bool copyToClipboard = false;
+		bool sequence = false;
+		uint32_t frame = 0;
+		uint32_t index = 0;
+		uint32_t count = 0;
+		uint64_t captureTimeUs = 0;
 	};
+	std::atomic<uint32_t> sequenceRequested{ 0 };
+	std::atomic<uint32_t> sequencePending{ 0 };
+	uint32_t sequenceRemaining = 0;
+	uint32_t sequenceCount = 0;
+	uint32_t sequenceLastFrame = UINT32_MAX;
+	std::filesystem::path sequenceDirectory;
+	std::vector<PendingScreenshot> sequenceShots;
+	bool CaptureFrame(bool sequence);
 
 	std::mutex screenshotQueueMutex;
 	std::condition_variable screenshotQueueCV;

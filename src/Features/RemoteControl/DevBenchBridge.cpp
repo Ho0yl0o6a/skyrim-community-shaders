@@ -17,6 +17,8 @@
 #	include "Features/RenderDoc.h"
 #	include "Features/ScreenshotFeature.h"
 #	include "Globals.h"
+#	include "RemixBridge.h"
+#	include "RemixScene.h"
 #	include "Profiler.h"
 #	include "ShaderCache.h"
 #	include "State.h"
@@ -334,6 +336,9 @@ namespace
 
 	json BuildInspectResult(const json& a_args)
 	{
+		if (a_args.value("kind", "") == "remixScene") {
+			return RunOnMainThread([filter = a_args.value("filter", "")]() { return json::parse(RemixScene::Inspect(filter)); });
+		}
 		const std::string kind = a_args.value("kind", std::string{});
 		if (kind.empty())
 			return json{ { "error", "missing required parameter 'kind'" } };
@@ -401,6 +406,18 @@ namespace
 	/**
 	 * @brief Handles DevBench inspection requests for plugin state, profiler metrics, and shader cache status.
 	 */
+	json BuildRemixResult(const json& args)
+	{
+		return RunOnMainThread([args]() {
+			return json{ { "success", RemixBridge::SetConfig(args.at("name").get<std::string>(), args.at("value").get<std::string>()) } };
+		});
+	}
+
+	void RemixToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
+	{
+		RunHandler(&BuildRemixResult, a_argsJson, a_sink, a_write);
+	}
+
 	void InspectToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
 	{
 		RunHandler(&BuildInspectResult, a_argsJson, a_sink, a_write);
@@ -498,6 +515,20 @@ namespace
 			});
 		}
 
+		if (kind == "sequence") {
+			if (!a_args.contains("frames") || !a_args["frames"].is_number_integer())
+				return json{ { "error", "sequence requires integer frames in [2,64]" } };
+			const auto frames = a_args["frames"].get<int>();
+			if (frames < 2 || frames > 64)
+				return json{ { "error", "sequence requires integer frames in [2,64]" } };
+			return RunOnMainThread([frames, frame]() -> json {
+				auto& shot = globals::features::screenshotFeature;
+				return json{ { "queued", shot.loaded && shot.RequestSequence(frames) },
+					{ "kind", "sequence" }, { "frames", frames }, { "enqueued_at_frame", frame },
+					{ "scope", "Consecutive pre-Present framebuffer copies, max 512 MiB; Remix test SDR world only. Busy requests rejected. Not display pacing." } };
+			});
+		}
+
 		if (kind == "screenshot") {
 			// loaded read on the main thread (toggle tasks mutate it); the request flag is atomic.
 			return RunOnMainThread([frame]() -> json {
@@ -509,7 +540,7 @@ namespace
 			});
 		}
 
-		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "renderdoc", "screenshot" }) } };
+		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "renderdoc", "screenshot", "sequence" }) } };
 	}
 
 	/**
@@ -641,15 +672,18 @@ namespace DevBenchBridge
 		dvb->RegisterTool("communityshaders.feature", featureDesc, &FeatureToolHandler, nullptr);
 
 		static constexpr const char* inspectDesc =
-			R"({"description":"Read non-feature Community Shaders engine state. Kind-dispatched; response is a JSON object. kind=state -> {plugin,frame_count}. kind=shadercache -> {compiling,completedTasks,totalTasks,failedTasks,currentFailedCount,frame_count}. kind=profiler -> {totalGpuMs,totalCpuMs,frame_count,passes:[{name,gpuMs,gpuAvgMs,gpuP95Ms,gpuP99Ms,cpuMs,cpuAvgMs,gpuHistory:[...]}]}; optional filter param to match pass names.","readOnly":true,"inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["state","shadercache","profiler"]},"filter":{"type":"string"}},"required":["kind"]}})";
+			R"({"description":"Read non-feature Community Shaders engine state. Kind-dispatched; response is a JSON object. kind=state -> {plugin,frame_count}. kind=shadercache -> {compiling,completedTasks,totalTasks,failedTasks,currentFailedCount,frame_count}. kind=profiler -> {totalGpuMs,totalCpuMs,frame_count,passes:[{name,gpuMs,gpuAvgMs,gpuP95Ms,gpuP99Ms,cpuMs,cpuAvgMs,gpuHistory:[...]}]}; optional filter param to match pass names. kind=remixScene: read-only retained geometry census with up to 48 nearest records; filter matches geometry and ancestor names/types.","readOnly":true,"inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["state","shadercache","profiler","remixScene"]},"filter":{"type":"string"}},"required":["kind"]}})";
 		dvb->RegisterTool("communityshaders.inspect", inspectDesc, &InspectToolHandler, nullptr);
+		static constexpr const char* remixDesc =
+			R"({"description":"Set an RTX Remix runtime option for the opt-in diagnostic process only.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"value":{"type":"string"}},"required":["name","value"]}})";
+		dvb->RegisterTool("communityshaders.remix", remixDesc, &RemixToolHandler, nullptr);
 
 		static constexpr const char* shadercacheDesc =
 			R"({"description":"Manage Community Shaders' compiled shader cache. Action-dispatched, fire-and-forget on the main thread. clear: drop the IN-MEMORY cache only; with the disk cache enabled shaders reload from Data/ShaderCache rather than recompiling, so this does NOT guarantee a recompile. deleteDisk: delete the on-disk cache AND drop the in-memory cache, forcing a full cold recompile (use this for compile benchmarks). Watch progress via communityshaders.inspect kind=shadercache and the communityshaders.shaderRecompiled event. Read-only status is communityshaders.inspect kind=shadercache.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["clear","deleteDisk"]}},"required":["action"]}})";
 		dvb->RegisterTool("communityshaders.shadercache", shadercacheDesc, &ShadercacheToolHandler, nullptr);
 
 		static constexpr const char* captureDesc =
-			R"({"description":"Trigger a frame capture on the next render. Kind-dispatched. kind=renderdoc: RenderDoc multi-frame capture via the in-app API, honors frames (1-120, default 1); RenderDoc must be attached/loaded (check communityshaders.feature list for RenderDoc.loaded). kind=screenshot: lossless screenshot via the Screenshot feature; frames is ignored. Fire-and-forget — no artifact path is returned synchronously.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["renderdoc","screenshot"]},"frames":{"type":"number"}},"required":["kind"]}})";
+			R"({"description":"Trigger a frame capture. kind=renderdoc: RenderDoc multi-frame capture, frames 1-120; requires attached RenderDoc. kind=screenshot: lossless Screenshot feature capture; frames ignored. kind=sequence: consecutive pre-Present SDR framebuffers with frame-number sidecars, frames integer 2-64, max 512 MiB, Remix test world only; busy requests rejected. Sequence is not a WSI display/pacing capture. Fire-and-forget; no artifact path returned synchronously.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["renderdoc","screenshot","sequence"]},"frames":{"type":"number"}},"required":["kind"]}})";
 		dvb->RegisterTool("communityshaders.capture", captureDesc, &CaptureToolHandler, nullptr);
 
 		static constexpr const char* settingsDesc =

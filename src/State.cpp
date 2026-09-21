@@ -1,4 +1,5 @@
 #include "State.h"
+#include "RemixBridge.h"
 
 #include <codecvt>
 
@@ -446,6 +447,11 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 					logger::info("Feature '{}' is disabled by default", featureName);
 				}
 				bool isDisabled = disabledFeatures.contains(featureName) && disabledFeatures[featureName];
+				// Remix owns world shading, lighting, and post-processing. Keep only
+				// non-rendering test/control features in this isolated process.
+				// This process-only gate does not rewrite the user's saved settings.
+				if (RemixBridge::IsRequested() && featureName != "RemoteControl" && featureName != "PerformanceOverlay" && featureName != "Screenshot")
+					isDisabled = true;
 				if (!isDisabled) {
 					logger::info("Loading Feature: '{}'", featureName);
 

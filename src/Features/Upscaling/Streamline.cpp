@@ -22,6 +22,7 @@
 #include <sl_consts.h>
 #include <sl_core_api.h>
 #include <sl_device_wrappers.h>
+#include <sl_helpers_vk.h>
 #include <sl_dlss.h>
 #include <sl_dlss_g.h>
 #include <sl_fsr.h>
@@ -47,6 +48,7 @@ namespace
 		PFun_slEvaluateFeature* slEvaluateFeature = nullptr;
 		PFun_slGetFeatureFunction* slGetFeatureFunction = nullptr;
 		PFun_slSetFeatureLoaded* slSetFeatureLoaded = nullptr;
+		PFun_slSetVulkanInfo* slSetVulkanInfo = nullptr;
 
 		PFun_slDLSSGetOptimalSettings* slDLSSGetOptimalSettings = nullptr;
 		PFun_slDLSSSetOptions* slDLSSSetOptions = nullptr;
@@ -425,6 +427,7 @@ bool Streamline::Initialize()
 		Resolve(g_sl.slGetFeatureFunction, "slGetFeatureFunction");
 
 	Resolve(g_sl.slSetFeatureLoaded, "slSetFeatureLoaded");
+	Resolve(g_sl.slSetVulkanInfo, "slSetVulkanInfo");
 	if (!resolved) {
 		FreeLibrary(g_sl.interposer);
 		g_sl.interposer = nullptr;
@@ -485,6 +488,33 @@ void Streamline::SetVulkanDevice()
 	}
 
 	vulkanDeviceSet = true;
+
+	// Streamline normally learns the Vulkan device through its own vkCreateDevice
+	// and vkCreateInstance proxies. Under Remix it never sees them: the Remix
+	// DXVK fork brings up Vulkan without going through the interposer, so every
+	// feature probe answers "has not been initialized yet -- did you forget to
+	// call slSetD3DDevice/slSetVulkanInfo?" and the whole feature set, frame
+	// generation included, reports unsupported. slSetVulkanInfo is the documented
+	// path for exactly this case: hooking Vulkan manually rather than through the
+	// proxies. The handles come from DXVKInterop, which already holds them.
+	if (g_sl.slSetVulkanInfo) {
+		sl::VulkanInfo info {};
+		info.device = dxvk->GetDevice();
+		info.instance = dxvk->GetInstance();
+		info.physicalDevice = dxvk->GetPhysicalDevice();
+		info.graphicsQueueFamily = dxvk->GetQueueFamilyIndex();
+		info.graphicsQueueIndex = 0;
+		info.computeQueueFamily = dxvk->GetQueueFamilyIndex();
+		info.computeQueueIndex = 0;
+		info.opticalFlowQueueFamily = dxvk->GetQueueFamilyIndex();
+		info.opticalFlowQueueIndex = 0;
+		info.useNativeOpticalFlowMode = true;
+		const sl::Result r = g_sl.slSetVulkanInfo(info);
+		logger::info("[Streamline] slSetVulkanInfo result {} (device {}, queueFamily {})",
+			static_cast<int>(r), fmt::ptr(info.device), info.graphicsQueueFamily);
+	} else {
+		logger::warn("[Streamline] slSetVulkanInfo unavailable - features cannot bind to the DXVK device");
+	}
 
 	// Probe support against DXVK's physical device.
 	sl::AdapterInfo adapter{};

@@ -1,4 +1,5 @@
 #include "RemixSky.h"
+#include "RemixSkyPolicy.h"
 
 #include "Globals.h"
 #include "Util.h"
@@ -36,6 +37,28 @@ namespace
 		}
 		return g_resolveCS.get();
 	}
+
+	// Each of these gates exactly one scene-graph root submitted into the
+	// reflections cubemap. The sky is the one root wanted there, so it is forced
+	// on even where the player turned it off, and the LOD roots are forced off.
+	struct ReflectionRoot
+	{
+		const char* setting;
+		bool whileRemixOwnsTheWorld;
+	};
+	constexpr ReflectionRoot kReflectionRoots[] = {
+		{ "bReflectLODLand:Water", false },
+		{ "bReflectLODObjects:Water", false },
+		{ "bReflectLODTrees:Water", false },
+		{ "bReflectSky:Water", true },
+	};
+
+	struct ReflectionLodOverride
+	{
+		bool active = false;
+		std::array<RemixSkyPolicy::SettingOverride, std::size(kReflectionRoots)> settings{};
+	};
+	ReflectionLodOverride g_reflectionLod;
 
 	bool EnsureResources()
 	{
@@ -98,13 +121,17 @@ namespace
 	// rather than by whatever the cube happened to hold outside.
 	bool HasVisibleSky(const RE::Sky* sky)
 	{
-		return sky && sky->mode.get() == RE::Sky::Mode::kFull;
+		const auto* player = RE::PlayerCharacter::GetSingleton();
+		const auto* cell = player ? player->GetParentCell() : nullptr;
+		return sky && RemixSkyPolicy::CanSubmitWeatherCube(cell != nullptr, cell && cell->IsInteriorCell(),
+			cell && cell->cellFlags.any(RE::TESObjectCELL::Flag::kShowSky),
+			static_cast<uint32_t>(sky->mode.get()), sky->flags.any(RE::Sky::Flags::kHideSky));
 	}
 }
 
 namespace RemixSky
 {
-	void Submit()
+	bool Submit()
 	{
 		static uint32_t frame = 0;
 		const bool report = (frame++ % 120) == 0;
@@ -117,28 +144,28 @@ namespace RemixSky
 		auto* sky = globals::game::sky;
 		if (!sky) {
 			skipped("no sky singleton");
-			return;
+			return false;
 		}
 		if (!HasVisibleSky(sky)) {
 			skipped(std::format("sky mode {}", static_cast<int>(sky->mode.get())).c_str());
-			return;
+			return false;
 		}
 
 		auto* renderer = globals::game::renderer;
 		if (!renderer) {
 			skipped("no renderer");
-			return;
+			return false;
 		}
 
 		auto& reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 		if (!reflections.SRV) {
 			skipped("reflections cubemap has no shader resource view");
-			return;
+			return false;
 		}
 
 		if (!EnsureResources()) {
 			skipped("resolve resources unavailable");
-			return;
+			return false;
 		}
 
 		if (report) {
@@ -176,11 +203,40 @@ namespace RemixSky
 
 		// Registers and instances in one call: the runtime clears its active dome
 		// at the end of every frame, so this has to happen each frame regardless.
-		g_setSkyDome(g_latLong->srv.get(), &identity, radiance);
+		return g_setSkyDome(g_latLong->srv.get(), &identity, radiance) == REMIXAPI_ERROR_CODE_SUCCESS;
+	}
+
+	void SetReflectionLodEnabled(bool enabled)
+	{
+		// Disabling means overriding, so the branches are inverted here: the
+		// player's values are captured on the way in and replayed on the way out.
+		if (enabled && !g_reflectionLod.active) {
+			return;
+		}
+		const bool changed = g_reflectionLod.active == enabled;
+
+		for (size_t i = 0; i < std::size(kReflectionRoots); ++i) {
+			const auto& root = kReflectionRoots[i];
+			auto* setting = RE::GetINISetting(root.setting);
+			if (!setting) {
+				logger::warn("[RemixSky] {} not found; the sky dome may not be clean", root.setting);
+				continue;
+			}
+			if (enabled) {
+				g_reflectionLod.settings[i].Restore(setting->data.b);
+			} else {
+				g_reflectionLod.settings[i].Apply(setting->data.b, root.whileRemixOwnsTheWorld);
+			}
+		}
+
+		g_reflectionLod.active = !enabled;
+		if (changed)
+			logger::info("[RemixSky] reflection LOD {}", enabled ? "restored" : "suppressed");
 	}
 
 	void Release()
 	{
+		SetReflectionLodEnabled(true);
 		g_latLong.reset();
 		g_resolveCS = nullptr;
 		g_sampler = nullptr;

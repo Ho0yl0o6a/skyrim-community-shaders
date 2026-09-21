@@ -1,6 +1,7 @@
 #include "DxvkLoader.h"
 
 #include "Aftermath.h"
+#include "RemixBridge.h"
 
 #include <filesystem>
 
@@ -58,6 +59,21 @@ namespace DxvkLoader
 			logger::warn("[DXVK] Failed to enable HDR color-space support (error {})", ::GetLastError());
 		}
 
+		// Skyrim asks D3D11 for a single frame of latency. On the native runtime that costs
+		// little, because the driver's own thread absorbs the work. Here the frame is built by
+		// three stages in series -- the game thread, DXVK's command-stream thread and the GPU --
+		// and a latency of one forces the game thread to wait for the GPU to retire the previous
+		// frame before it may start the next, so the command-stream thread sits idle for a third
+		// of every frame instead of running a frame behind. Two is enough to fill it; deeper
+		// queues measured the same throughput and only add input latency. DXVK's own
+		// dxgi.maxFrameLatency cannot do this: it is a cap, and the game already asked for less.
+		wchar_t existingLatency[16]{};
+		if (::GetEnvironmentVariableW(L"DXVK_FRAME_LATENCY_OVERRIDE", existingLatency, ARRAYSIZE(existingLatency)) != 0) {
+			logger::info("[DXVK] DXVK_FRAME_LATENCY_OVERRIDE already set externally; leaving it alone");
+		} else if (!::SetEnvironmentVariableW(L"DXVK_FRAME_LATENCY_OVERRIDE", L"2")) {
+			logger::warn("[DXVK] Failed to deepen the present queue (error {})", ::GetLastError());
+		}
+
 		// DXVK reads DXVK_DEBUG once at instance creation, so the request has to be in place before
 		// the game creates its device.
 		//
@@ -72,7 +88,15 @@ namespace DxvkLoader
 		// somewhere separate from CommunityShaders.log that nobody thinks to send. Pointing DXVK at
 		// the SKSE log directory means "zip your SKSE logs folder" collects every artifact we
 		// produce, the GPU crash dumps included.
-		if (const auto logDir = logger::log_directory()) {
+		// A developer who has already chosen where DXVK's logs go keeps that choice. The SKSE log
+		// folder is the right default for a bug report, but it is on the system drive, and a test
+		// harness measuring frame times cannot afford log writes that block -- or silently stop --
+		// because that volume is out of space.
+		wchar_t existingLogPath[4]{};
+		if (::GetEnvironmentVariableW(L"DXVK_LOG_PATH", existingLogPath, ARRAYSIZE(existingLogPath)) != 0
+			|| ::GetLastError() == ERROR_MORE_DATA) {
+			logger::info("[DXVK] DXVK_LOG_PATH already set externally; leaving it alone");
+		} else if (const auto logDir = logger::log_directory()) {
 			const auto path = logDir->wstring();
 			if (!::SetEnvironmentVariableW(L"DXVK_LOG_PATH", path.c_str()))
 				logger::warn("[DXVK] Failed to redirect DXVK logs to the SKSE log folder (error {})", ::GetLastError());
@@ -93,10 +117,16 @@ namespace DxvkLoader
 				logger::warn("[DXVK] Failed to request GPU crash analysis (error {})", ::GetLastError());
 		}
 
-		const auto dir = GetRuntimeDir();
+		auto dir = GetRuntimeDir();
 		if (dir.empty()) {
 			logger::error("[DXVK] Could not resolve plugin directory for DXVK DLLs");
 			return false;
+		}
+
+		// Keep the experimental Remix runtime isolated from the shipping DXVK binaries.
+		if (RemixBridge::IsRequested()) {
+			dir /= L"Remix";
+			logger::info("[Remix] Selecting API-only Vulkan runtime from '{}'", dir.string());
 		}
 
 		const auto dxgiPath = (dir / L"dxvk_dxgi.dll").wstring();
