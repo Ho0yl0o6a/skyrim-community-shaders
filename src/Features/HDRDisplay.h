@@ -174,12 +174,12 @@ public:
 	// HDR data CB contents from current settings/game state (previewSDR=0).
 	HDRDataCB BuildHDRData() const;
 
-	ConstantBuffer* hdrDataCB = nullptr;
+	std::unique_ptr<ConstantBuffer> hdrDataCB;
 
-	Texture2D* hdrTexture = nullptr;
-	Texture2D* outputTexture = nullptr;
-	Texture2D* uiTexture = nullptr;          // Separate UI render target for proper compositing
-	Texture2D* cleanSceneCapture = nullptr;  // Pre-blur copy of hdrTexture for clean captures
+	std::unique_ptr<Texture2D> hdrTexture;
+	std::unique_ptr<Texture2D> outputTexture;
+	std::unique_ptr<Texture2D> uiTexture;          // Separate UI render target for proper compositing
+	std::unique_ptr<Texture2D> cleanSceneCapture;  // Pre-blur copy of hdrTexture for clean captures
 	uint cleanSceneCaptureFrame = UINT32_MAX;  // frameCount when cleanSceneCapture was last refreshed
 
 	ID3D11ComputeShader* hdrOutputCS = nullptr;

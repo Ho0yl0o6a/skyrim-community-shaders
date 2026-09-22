@@ -61,7 +61,7 @@ public:
 
 	Settings settings;
 
-	ConstantBuffer* perFrame = nullptr;
+	std::unique_ptr<ConstantBuffer> perFrame;
 
 	eastl::unique_ptr<Buffer> collisionBoundingBoxes = nullptr;
 	eastl::unique_ptr<Buffer> collisionInstances = nullptr;
@@ -76,7 +76,7 @@ public:
 	ID3D11ComputeShader* GetCollisionUpdateCS();
 	ID3D11ComputeShader* collisionUpdateCS;
 
-	Texture2D* collisionTexture = nullptr;
+	std::unique_ptr<Texture2D> collisionTexture;
 
 	/** @brief Creates the collision texture, structured buffers for bounding boxes and collision instances. */
 	virtual void SetupResources() override;

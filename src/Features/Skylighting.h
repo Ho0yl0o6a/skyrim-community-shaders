@@ -82,11 +82,11 @@ public:
 
 	winrt::com_ptr<ID3D11SamplerState> comparisonSampler = nullptr;
 
-	Texture2D* texOcclusion = nullptr;
-	Texture3D* texProbeArray = nullptr;
-	Texture3D* texAccumFramesArray = nullptr;
-	Texture3D* texShadowBitmask = nullptr;
-	Texture3D* texShadowVisibility = nullptr;
+	std::unique_ptr<Texture2D> texOcclusion;
+	std::unique_ptr<Texture3D> texProbeArray;
+	std::unique_ptr<Texture3D> texAccumFramesArray;
+	std::unique_ptr<Texture3D> texShadowBitmask;
+	std::unique_ptr<Texture3D> texShadowVisibility;
 
 	ID3D11ShaderResourceView* shadowCascadeSRV = nullptr;
 

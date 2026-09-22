@@ -1394,7 +1394,7 @@ void Upscaling::SetupResources()
 
 	DX::ThrowIfFailed(globals::d3d::device->CreateDepthStencilState(&depthStencilDesc, upscaleDepthStencilState.put()));
 
-	jitterCB = new ConstantBuffer(ConstantBufferDesc<JitterCB>());
+	jitterCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<JitterCB>());
 
 	D3D11_BLEND_DESC blendDesc = {};
 	blendDesc.AlphaToCoverageEnable = false;
@@ -1716,7 +1716,7 @@ void Upscaling::UpscaleDepth()
 	context->RSSetState(upscaleRasterizerState.get());
 	context->OMSetBlendState(upscaleBlendState.get(), nullptr, 0xffffffff);
 
-	ID3D11SamplerState* samplers[] = { deferred->linearSampler };
+	ID3D11SamplerState* samplers[] = { deferred->linearSampler.get() };
 	context->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
 
 	JitterCB jitterData;

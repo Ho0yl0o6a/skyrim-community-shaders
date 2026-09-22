@@ -620,6 +620,14 @@ void HDRDisplay::PostPostLoad()
 
 void HDRDisplay::SetupResources()
 {
+	// Minimizing collapses the client area and the game rebuilds its render targets at 1x1. These
+	// textures are ours, so keeping them at the last real size means the restore finds them
+	// already correct. Following the window down and back up destroyed and rebuilt ~100 MB of
+	// full-screen targets on every alt-tab.
+	if (auto* graphicsState = globals::game::graphicsState;
+		graphicsState && (graphicsState->screenWidth <= 1 || graphicsState->screenHeight <= 1))
+		return;
+
 	if (hdrTexture || outputTexture || uiTexture || hdrDataCB) {
 		if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
 			logger::error("[HDR] resource rebuild deferred because command completion could not be proven");
@@ -676,9 +684,9 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	hdrTexture = new Texture2D(texDesc, "HDR::HdrTexture");
-	hdrTexture->CreateSRV(srvDesc);
-	hdrTexture->CreateUAV(uavDesc);
+		hdrTexture = std::make_unique<Texture2D>(texDesc, "HDR::HdrTexture");
+		hdrTexture->CreateSRV(srvDesc);
+		hdrTexture->CreateUAV(uavDesc);
 
 	// RTV so ISHDR can render directly into this float texture
 	D3D11_RENDER_TARGET_VIEW_DESC hdrRtvDesc{};
@@ -693,7 +701,7 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	outputTexture = new Texture2D(texDesc, "HDR::OutputTexture");
+	outputTexture = std::make_unique<Texture2D>(texDesc, "HDR::OutputTexture");
 	outputTexture->CreateSRV(srvDesc);
 	outputTexture->CreateUAV(uavDesc);
 
@@ -710,7 +718,7 @@ void HDRDisplay::SetupResources()
 	D3D11_UNORDERED_ACCESS_VIEW_DESC uiUavDesc = uavDesc;
 	uiUavDesc.Format = uiTexDesc.Format;
 
-	uiTexture = new Texture2D(uiTexDesc, "HDR::UiTexture");
+	uiTexture = std::make_unique<Texture2D>(uiTexDesc, "HDR::UiTexture");
 	uiTexture->CreateSRV(uiSrvDesc);
 	uiTexture->CreateUAV(uiUavDesc);
 
@@ -720,7 +728,7 @@ void HDRDisplay::SetupResources()
 	rtvDesc.Texture2D.MipSlice = 0;
 	uiTexture->CreateRTV(rtvDesc);
 
-	hdrDataCB = new ConstantBuffer(ConstantBufferDesc<HDRDataCB>(), "HDR::DataCB");
+	hdrDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<HDRDataCB>(), "HDR::DataCB");
 
 	UpdateHDRData();
 
@@ -1164,8 +1172,7 @@ void HDRDisplay::SnapshotCleanScene()
 		if (capDesc.Width != sceneDesc.Width || capDesc.Height != sceneDesc.Height || capDesc.Format != sceneDesc.Format) {
 			cleanSceneCapture->srv = nullptr;
 			cleanSceneCapture->resource = nullptr;
-			delete cleanSceneCapture;
-			cleanSceneCapture = nullptr;
+			cleanSceneCapture.reset();
 		}
 	}
 
@@ -1180,7 +1187,7 @@ void HDRDisplay::SnapshotCleanScene()
 		capDesc.CPUAccessFlags = 0;
 		capDesc.MiscFlags = 0;
 
-		cleanSceneCapture = new Texture2D(capDesc, "HDR::CleanSceneCapture");
+		cleanSceneCapture = std::make_unique<Texture2D>(capDesc, "HDR::CleanSceneCapture");
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 		srvDesc.Format = capDesc.Format;
@@ -1228,16 +1235,14 @@ void HDRDisplay::DestroyResources()
 		hdrTexture->uav = nullptr;
 		hdrTexture->rtv = nullptr;
 		hdrTexture->resource = nullptr;
-		delete hdrTexture;
-		hdrTexture = nullptr;
+		hdrTexture.reset();
 	}
 
 	if (outputTexture) {
 		outputTexture->srv = nullptr;
 		outputTexture->uav = nullptr;
 		outputTexture->resource = nullptr;
-		delete outputTexture;
-		outputTexture = nullptr;
+		outputTexture.reset();
 	}
 
 	if (uiTexture) {
@@ -1245,21 +1250,18 @@ void HDRDisplay::DestroyResources()
 		uiTexture->uav = nullptr;
 		uiTexture->rtv = nullptr;
 		uiTexture->resource = nullptr;
-		delete uiTexture;
-		uiTexture = nullptr;
+		uiTexture.reset();
 	}
 
 	if (cleanSceneCapture) {
 		cleanSceneCapture->srv = nullptr;
 		cleanSceneCapture->resource = nullptr;
-		delete cleanSceneCapture;
-		cleanSceneCapture = nullptr;
+		cleanSceneCapture.reset();
 		cleanSceneCaptureFrame = UINT32_MAX;
 	}
 
 	if (hdrDataCB) {
-		delete hdrDataCB;
-		hdrDataCB = nullptr;
+		hdrDataCB.reset();
 	}
 
 	RestoreLDRRenderTargets();

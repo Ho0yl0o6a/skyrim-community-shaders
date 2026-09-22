@@ -255,7 +255,8 @@ void SubsurfaceScattering::DrawSSS()
 	{
 		ID3D11Buffer* buffer[1] = { blurCB->CB() };
 		context->CSSetConstantBuffers(1, 1, buffer);
-		context->CSSetSamplers(0, 1, &globals::deferred->pointSampler);
+		ID3D11SamplerState* samplers[1] = { globals::deferred->pointSampler.get() };
+		context->CSSetSamplers(0, 1, samplers);
 
 		auto main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
@@ -365,7 +366,7 @@ void SubsurfaceScattering::DrawSSS()
 void SubsurfaceScattering::SetupResources()
 {
 	{
-		blurCB = new ConstantBuffer(ConstantBufferDesc<BlurCB>());
+		blurCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<BlurCB>());
 	}
 
 	auto renderer = globals::game::renderer;
@@ -384,11 +385,11 @@ void SubsurfaceScattering::SetupResources()
 		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 		main.UAV->GetDesc(&uavDesc);
 
-		blurHorizontalTemp = new Texture2D(texDesc);
+		blurHorizontalTemp = std::make_unique<Texture2D>(texDesc);
 		blurHorizontalTemp->CreateSRV(srvDesc);
 		blurHorizontalTemp->CreateUAV(uavDesc);
 
-		diffuseNoAlbedoTex = new Texture2D(texDesc);
+		diffuseNoAlbedoTex = std::make_unique<Texture2D>(texDesc);
 		diffuseNoAlbedoTex->CreateSRV(srvDesc);
 		diffuseNoAlbedoTex->CreateUAV(uavDesc);
 	}

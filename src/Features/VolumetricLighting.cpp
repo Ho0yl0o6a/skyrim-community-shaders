@@ -169,7 +169,7 @@ void VolumetricLighting::PostPostLoad()
 
 void VolumetricLighting::SetupResources()
 {
-	vlDataCB = new ConstantBuffer(ConstantBufferDesc<VLData>());
+	vlDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<VLData>());
 }
 
 void VolumetricLighting::EarlyPrepass()

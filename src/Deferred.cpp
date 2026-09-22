@@ -156,12 +156,14 @@ void Deferred::SetupResources()
 		samplerDesc.MaxAnisotropy = 1;
 		samplerDesc.MinLOD = 0;
 		samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &linearSampler));
-		Util::SetResourceName(linearSampler, "Deferred::LinearSampler");
+		linearSampler = nullptr;
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, linearSampler.put()));
+		Util::SetResourceName(linearSampler.get(), "Deferred::LinearSampler");
 
 		samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &pointSampler));
-		Util::SetResourceName(pointSampler, "Deferred::PointSampler");
+		pointSampler = nullptr;
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, pointSampler.put()));
+		Util::SetResourceName(pointSampler.get(), "Deferred::PointSampler");
 	}
 
 	// Directional shadow structured buffer (t98): CPU-written each frame, read-only on GPU.
@@ -181,8 +183,8 @@ void Deferred::SetupResources()
 		srvDesc.Buffer.FirstElement = 0;
 		srvDesc.Buffer.NumElements = 1;
 
-		delete directionalShadowLights;
-		directionalShadowLights = new Buffer(sbDesc, nullptr, "Deferred::DirectionalShadowLights");
+		directionalShadowLights.reset();
+		directionalShadowLights = std::make_unique<Buffer>(sbDesc, nullptr, "Deferred::DirectionalShadowLights");
 		directionalShadowLights->CreateSRV(srvDesc);
 	}
 }
@@ -399,8 +401,10 @@ void Deferred::DeferredPasses()
 			ibl.loaded ? ibl.skyIBLTexture->srv.get() : nullptr,                                             // t15 SkyIBLTexture
 		};
 
-		if (dynamicCubemaps.loaded)
-			context->CSSetSamplers(0, 1, &linearSampler);
+		if (dynamicCubemaps.loaded) {
+			ID3D11SamplerState* samplers[1] = { linearSampler.get() };
+			context->CSSetSamplers(0, 1, samplers);
+		}
 
 		context->CSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
 

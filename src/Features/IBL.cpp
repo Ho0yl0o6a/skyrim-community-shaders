@@ -298,11 +298,11 @@ void IBL::Prepass()
 
 	std::array<ID3D11ShaderResourceView*, 1> srvs = { (dynamicCubemaps.loaded && envTexture) ? envTexture->srv.get() : nullptr };
 	std::array<ID3D11UnorderedAccessView*, 1> uavs = { envIBLTexture->uav.get() };
-	std::array<ID3D11SamplerState*, 1> samplers = { Deferred::GetSingleton()->linearSampler };
+	std::array<ID3D11SamplerState*, 1> samplers = { Deferred::GetSingleton()->linearSampler.get() };
 
 	// IBL - Environment cubemap SH projection (skip for DALC-based modes that don't use EnvIBL)
 	if (settings.DALCMode < 2) {
-		samplers[0] = Deferred::GetSingleton()->linearSampler;
+		samplers[0] = Deferred::GetSingleton()->linearSampler.get();
 
 		context->CSSetSamplers(0, (uint)samplers.size(), samplers.data());
 		context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
@@ -380,10 +380,10 @@ void IBL::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		envIBLTexture = new Texture2D(texDesc);
+		envIBLTexture = std::make_unique<Texture2D>(texDesc);
 		envIBLTexture->CreateSRV(srvDesc);
 		envIBLTexture->CreateUAV(uavDesc);
-		skyIBLTexture = new Texture2D(texDesc);
+		skyIBLTexture = std::make_unique<Texture2D>(texDesc);
 		skyIBLTexture->CreateSRV(srvDesc);
 		skyIBLTexture->CreateUAV(uavDesc);
 	}

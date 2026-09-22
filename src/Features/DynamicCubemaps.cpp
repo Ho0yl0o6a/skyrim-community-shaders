@@ -330,7 +330,8 @@ void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 	ID3D11Buffer* buffer = updateCubemapCB->CB();
 	context->CSSetConstantBuffers(0, 1, &buffer);
 
-	context->CSSetSamplers(0, 1, &computeSampler);
+	ID3D11SamplerState* samplers[1] = { computeSampler.get() };
+	context->CSSetSamplers(0, 1, samplers);
 
 	context->CSSetShader(a_reflections ? (fakeReflections ? GetComputeShaderUpdateFakeReflections() : GetComputeShaderUpdateReflections()) : GetComputeShaderUpdate(), nullptr, 0);
 
@@ -375,10 +376,11 @@ void DynamicCubemaps::Inferrence(bool a_reflections)
 
 	auto& cubemap = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 
-	ID3D11ShaderResourceView* srvs[3] = { (a_reflections ? envCaptureReflectionsTexture : envCaptureTexture)->srv.get(), cubemap.SRV, defaultCubemap };
+	ID3D11ShaderResourceView* srvs[3] = { (a_reflections ? envCaptureReflectionsTexture : envCaptureTexture)->srv.get(), cubemap.SRV, defaultCubemap.get() };
 	context->CSSetShaderResources(0, 3, srvs);
 
-	context->CSSetSamplers(0, 1, &computeSampler);
+	ID3D11SamplerState* samplers[1] = { computeSampler.get() };
+	context->CSSetSamplers(0, 1, samplers);
 
 	context->CSSetShader(a_reflections ? (fakeReflections ? GetComputeShaderInferrenceFakeReflections() : GetComputeShaderInferrenceReflections()) : GetComputeShaderInferrence(), nullptr, 0);
 
@@ -431,7 +433,8 @@ void DynamicCubemaps::Irradiance(bool a_reflections, uint32_t a_startLevel, uint
 	{
 		auto srv = envInferredTexture->srv.get();
 		context->CSSetShaderResources(0, 1, &srv);
-		context->CSSetSamplers(0, 1, &computeSampler);
+		ID3D11SamplerState* samplers[1] = { computeSampler.get() };
+	context->CSSetSamplers(0, 1, samplers);
 		context->CSSetShader(GetComputeShaderSpecularIrradiance(), nullptr, 0);
 
 		ID3D11Buffer* buffer = spmapCB->CB();
@@ -456,7 +459,7 @@ void DynamicCubemaps::Irradiance(bool a_reflections, uint32_t a_startLevel, uint
 			const SpecularMapFilterSettingsCB spmapConstants = { level * delta_roughness };
 			spmapCB->Update(spmapConstants);
 
-			auto uav = a_reflections ? uavReflectionsArray[level - 1] : uavArray[level - 1];
+			auto* uav = a_reflections ? uavReflectionsArray[level - 1].get() : uavArray[level - 1].get();
 
 			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 			context->Dispatch(numGroups, numGroups, 6);
@@ -486,7 +489,7 @@ void DynamicCubemaps::CompressToBC6H(bool a_reflections)
 		return;
 	}
 
-	auto* srcSRV = a_reflections ? envReflectionsTextureArraySRV : envTextureArraySRV;
+	auto* srcSRV = a_reflections ? envReflectionsTextureArraySRV.get() : envTextureArraySRV.get();
 
 	context->CSSetShader(shader, nullptr, 0);
 	context->CSSetShaderResources(0, 1, &srcSRV);
@@ -509,7 +512,8 @@ void DynamicCubemaps::CompressToBC6H(bool a_reflections)
 		cbData.MipLevel = level;
 		bc6hEncodeCB->Update(cbData);
 
-		context->CSSetUnorderedAccessViews(0, 1, &bc6hScratchUAVs[level], nullptr);
+		ID3D11UnorderedAccessView* scratchUAV[1] = { bc6hScratchUAVs[level].get() };
+		context->CSSetUnorderedAccessViews(0, 1, scratchUAV, nullptr);
 
 		std::uint32_t dispatchX = std::max(1u, (blocksX + 7) / 8);
 		std::uint32_t dispatchY = std::max(1u, (blocksY + 7) / 8);
@@ -528,7 +532,7 @@ void DynamicCubemaps::CompressToBC6H(bool a_reflections)
 	}
 
 
-	auto dst = a_reflections ? envReflectionsTextureBC6H : envTextureBC6H;
+	auto* dst = a_reflections ? envReflectionsTextureBC6H.get() : envTextureBC6H.get();
 	context->CopyResource(dst->resource.get(), bc6hScratchTexture->resource.get());
 }
 
@@ -643,8 +647,9 @@ void DynamicCubemaps::SetupResources()
 		samplerDesc.MaxAnisotropy = 1;
 		samplerDesc.MinLOD = 0;
 		samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &computeSampler));
-		Util::SetResourceName(computeSampler, "DynamicCubemaps::ComputeSampler");
+		computeSampler = nullptr;
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, computeSampler.put()));
+		Util::SetResourceName(computeSampler.get(), "DynamicCubemaps::ComputeSampler");
 	}
 
 	auto& cubemap = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
@@ -672,27 +677,27 @@ void DynamicCubemaps::SetupResources()
 		uavDesc.Texture2DArray.FirstArraySlice = 0;
 		uavDesc.Texture2DArray.ArraySize = texDesc.ArraySize;
 
-		envCaptureTexture = new Texture2D(texDesc);
+		envCaptureTexture = std::make_unique<Texture2D>(texDesc);
 		envCaptureTexture->CreateSRV(srvDesc);
 		envCaptureTexture->CreateUAV(uavDesc);
 
-		envCaptureRawTexture = new Texture2D(texDesc);
+		envCaptureRawTexture = std::make_unique<Texture2D>(texDesc);
 		envCaptureRawTexture->CreateSRV(srvDesc);
 		envCaptureRawTexture->CreateUAV(uavDesc);
 
-		envCapturePositionTexture = new Texture2D(texDesc);
+		envCapturePositionTexture = std::make_unique<Texture2D>(texDesc);
 		envCapturePositionTexture->CreateSRV(srvDesc);
 		envCapturePositionTexture->CreateUAV(uavDesc);
 
-		envCaptureReflectionsTexture = new Texture2D(texDesc);
+		envCaptureReflectionsTexture = std::make_unique<Texture2D>(texDesc);
 		envCaptureReflectionsTexture->CreateSRV(srvDesc);
 		envCaptureReflectionsTexture->CreateUAV(uavDesc);
 
-		envCaptureRawReflectionsTexture = new Texture2D(texDesc);
+		envCaptureRawReflectionsTexture = std::make_unique<Texture2D>(texDesc);
 		envCaptureRawReflectionsTexture->CreateSRV(srvDesc);
 		envCaptureRawReflectionsTexture->CreateUAV(uavDesc);
 
-		envCapturePositionReflectionsTexture = new Texture2D(texDesc);
+		envCapturePositionReflectionsTexture = std::make_unique<Texture2D>(texDesc);
 		envCapturePositionReflectionsTexture->CreateSRV(srvDesc);
 		envCapturePositionReflectionsTexture->CreateUAV(uavDesc);
 
@@ -700,11 +705,11 @@ void DynamicCubemaps::SetupResources()
 		srvDesc.Format = texDesc.Format;
 		uavDesc.Format = texDesc.Format;
 
-		envTexture = new Texture2D(texDesc);
+		envTexture = std::make_unique<Texture2D>(texDesc);
 		envTexture->CreateSRV(srvDesc);
 		envTexture->CreateUAV(uavDesc);
 
-		envReflectionsTexture = new Texture2D(texDesc);
+		envReflectionsTexture = std::make_unique<Texture2D>(texDesc);
 		envReflectionsTexture->CreateSRV(srvDesc);
 		envReflectionsTexture->CreateUAV(uavDesc);
 
@@ -717,13 +722,15 @@ void DynamicCubemaps::SetupResources()
 			arraySRVDesc.Texture2DArray.ArraySize = 6;
 			arraySRVDesc.Texture2DArray.MostDetailedMip = 0;
 			arraySRVDesc.Texture2DArray.MipLevels = MIPLEVELS;
-			DX::ThrowIfFailed(device->CreateShaderResourceView(envTexture->resource.get(), &arraySRVDesc, &envTextureArraySRV));
-			Util::SetResourceName(envTextureArraySRV, "DynamicCubemaps::EnvTexture ArraySRV");
-			DX::ThrowIfFailed(device->CreateShaderResourceView(envReflectionsTexture->resource.get(), &arraySRVDesc, &envReflectionsTextureArraySRV));
-			Util::SetResourceName(envReflectionsTextureArraySRV, "DynamicCubemaps::EnvReflections ArraySRV");
+			envTextureArraySRV = nullptr;
+			DX::ThrowIfFailed(device->CreateShaderResourceView(envTexture->resource.get(), &arraySRVDesc, envTextureArraySRV.put()));
+			Util::SetResourceName(envTextureArraySRV.get(), "DynamicCubemaps::EnvTexture ArraySRV");
+			envReflectionsTextureArraySRV = nullptr;
+			DX::ThrowIfFailed(device->CreateShaderResourceView(envReflectionsTexture->resource.get(), &arraySRVDesc, envReflectionsTextureArraySRV.put()));
+			Util::SetResourceName(envReflectionsTextureArraySRV.get(), "DynamicCubemaps::EnvReflections ArraySRV");
 		}
 
-		envInferredTexture = new Texture2D(texDesc, "DynamicCubemaps::EnvInferred");
+		envInferredTexture = std::make_unique<Texture2D>(texDesc, "DynamicCubemaps::EnvInferred");
 		envInferredTexture->CreateSRV(srvDesc);
 		envInferredTexture->CreateUAV(uavDesc);
 
@@ -749,7 +756,7 @@ void DynamicCubemaps::SetupResources()
 			scratchDesc.Usage = D3D11_USAGE_DEFAULT;
 			scratchDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
 			scratchDesc.MiscFlags = 0;
-			bc6hScratchTexture = new Texture2D(scratchDesc, "DynamicCubemaps::BC6HScratch");
+			bc6hScratchTexture = std::make_unique<Texture2D>(scratchDesc, "DynamicCubemaps::BC6HScratch");
 
 			D3D11_UNORDERED_ACCESS_VIEW_DESC scratchUAVDesc = {};
 			scratchUAVDesc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
@@ -758,8 +765,9 @@ void DynamicCubemaps::SetupResources()
 			scratchUAVDesc.Texture2DArray.ArraySize = 6;
 			for (std::uint32_t level = 0; level < bc6hMipLevels; ++level) {
 				scratchUAVDesc.Texture2DArray.MipSlice = level;
-				DX::ThrowIfFailed(device->CreateUnorderedAccessView(bc6hScratchTexture->resource.get(), &scratchUAVDesc, &bc6hScratchUAVs[level]));
-				Util::SetResourceName(bc6hScratchUAVs[level], "DynamicCubemaps::BC6HScratch UAV mip%u", level);
+				bc6hScratchUAVs[level] = nullptr;
+				DX::ThrowIfFailed(device->CreateUnorderedAccessView(bc6hScratchTexture->resource.get(), &scratchUAVDesc, bc6hScratchUAVs[level].put()));
+				Util::SetResourceName(bc6hScratchUAVs[level].get(), "DynamicCubemaps::BC6HScratch UAV mip%u", level);
 			}
 		}
 
@@ -782,22 +790,22 @@ void DynamicCubemaps::SetupResources()
 			bc6hSRVDesc.TextureCube.MostDetailedMip = 0;
 			bc6hSRVDesc.TextureCube.MipLevels = bc6hMipLevels;
 
-			envTextureBC6H = new Texture2D(bc6hDesc, "DynamicCubemaps::EnvTextureBC6H");
+			envTextureBC6H = std::make_unique<Texture2D>(bc6hDesc, "DynamicCubemaps::EnvTextureBC6H");
 			envTextureBC6H->CreateSRV(bc6hSRVDesc);
 
-			envReflectionsTextureBC6H = new Texture2D(bc6hDesc, "DynamicCubemaps::EnvReflectionsBC6H");
+			envReflectionsTextureBC6H = std::make_unique<Texture2D>(bc6hDesc, "DynamicCubemaps::EnvReflectionsBC6H");
 			envReflectionsTextureBC6H->CreateSRV(bc6hSRVDesc);
 		}
 
-		updateCubemapCB = new ConstantBuffer(ConstantBufferDesc<UpdateCubemapCB>(), "DynamicCubemaps::UpdateCubemapCB");
+		updateCubemapCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<UpdateCubemapCB>(), "DynamicCubemaps::UpdateCubemapCB");
 	}
 
 	{
-		bc6hEncodeCB = new ConstantBuffer(ConstantBufferDesc<BC6HEncodeCB>(), "DynamicCubemaps::BC6HEncodeCB");
+		bc6hEncodeCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<BC6HEncodeCB>(), "DynamicCubemaps::BC6HEncodeCB");
 	}
 
 	{
-		spmapCB = new ConstantBuffer(ConstantBufferDesc<SpecularMapFilterSettingsCB>(), "DynamicCubemaps::SpmapCB");
+		spmapCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SpecularMapFilterSettingsCB>(), "DynamicCubemaps::SpmapCB");
 	}
 
 	{
@@ -810,19 +818,22 @@ void DynamicCubemaps::SetupResources()
 
 		for (std::uint32_t level = 1; level < MIPLEVELS; ++level) {
 			uavDesc.Texture2DArray.MipSlice = level;
-			DX::ThrowIfFailed(device->CreateUnorderedAccessView(envTexture->resource.get(), &uavDesc, &uavArray[level - 1]));
-			Util::SetResourceName(uavArray[level - 1], "DynamicCubemaps::EnvTexture UAV mip%u", level);
+			uavArray[level - 1] = nullptr;
+			DX::ThrowIfFailed(device->CreateUnorderedAccessView(envTexture->resource.get(), &uavDesc, uavArray[level - 1].put()));
+			Util::SetResourceName(uavArray[level - 1].get(), "DynamicCubemaps::EnvTexture UAV mip%u", level);
 		}
 
 		for (std::uint32_t level = 1; level < MIPLEVELS; ++level) {
 			uavDesc.Texture2DArray.MipSlice = level;
-			DX::ThrowIfFailed(device->CreateUnorderedAccessView(envReflectionsTexture->resource.get(), &uavDesc, &uavReflectionsArray[level - 1]));
-			Util::SetResourceName(uavReflectionsArray[level - 1], "DynamicCubemaps::EnvReflections UAV mip%u", level);
+			uavReflectionsArray[level - 1] = nullptr;
+			DX::ThrowIfFailed(device->CreateUnorderedAccessView(envReflectionsTexture->resource.get(), &uavDesc, uavReflectionsArray[level - 1].put()));
+			Util::SetResourceName(uavReflectionsArray[level - 1].get(), "DynamicCubemaps::EnvReflections UAV mip%u", level);
 		}
 	}
 
 	{
-		DirectX::CreateDDSTextureFromFile(device, L"Data\\Shaders\\DynamicCubemaps\\defaultcubemap.dds", nullptr, &defaultCubemap);
+		defaultCubemap = nullptr;
+		DirectX::CreateDDSTextureFromFile(device, L"Data\\Shaders\\DynamicCubemaps\\defaultcubemap.dds", nullptr, defaultCubemap.put());
 	}
 }
 

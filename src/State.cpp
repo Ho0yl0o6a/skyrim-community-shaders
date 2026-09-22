@@ -4,6 +4,8 @@
 #include <codecvt>
 #include <ranges>
 
+#include <dxgi1_4.h>
+
 #include <pystring/pystring.h>
 
 #include "Deferred.h"
@@ -297,22 +299,62 @@ void State::Setup()
 	// feature that reloads from disk here shows up as a multi-second freeze on alt-tab, so name
 	// the expensive ones rather than leaving the cost anonymous.
 	{
-		std::vector<std::pair<std::string, double>> timings;
+		// Video memory in use, to attribute a rebuild's allocation to the feature doing it.
+		//
+		// This is ALLOCATION, not leak: a feature that correctly frees and rebuilds a 130 MB set
+		// of textures reports +130 MB here, because the new resources exist by the time the
+		// second reading is taken. Use it to find which feature is churning, then prove whether
+		// anything leaks by watching total process VRAM across repeated rebuilds.
+		winrt::com_ptr<IDXGIAdapter3> adapter;
+		if (auto* device = globals::d3d::device) {
+			winrt::com_ptr<IDXGIDevice> dxgiDevice;
+			winrt::com_ptr<IDXGIAdapter> baseAdapter;
+			if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()))) &&
+				SUCCEEDED(dxgiDevice->GetAdapter(baseAdapter.put())))
+				baseAdapter->QueryInterface(IID_PPV_ARGS(adapter.put()));
+		}
+		const auto usedBytes = [&adapter]() -> std::int64_t {
+			DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+			if (adapter && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+				return static_cast<std::int64_t>(info.CurrentUsage);
+			return 0;
+		};
+
+		struct FeatureCost
+		{
+			std::string  name;
+			double       ms;
+			std::int64_t bytes;
+		};
+		std::vector<FeatureCost> costs;
 		Feature::ForEachLoadedFeature("SetupResources", [&](Feature* feature) {
 			const auto start = std::chrono::steady_clock::now();
+			const auto vramBefore = usedBytes();
 			feature->SetupResources();
-			timings.emplace_back(feature->GetShortName(),
-				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+			costs.emplace_back(feature->GetShortName(),
+				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
+				usedBytes() - vramBefore);
 		});
-		std::ranges::sort(timings, std::ranges::greater{}, &std::pair<std::string, double>::second);
+
+		std::ranges::sort(costs, std::ranges::greater{}, &FeatureCost::ms);
 		std::string slowest;
-		for (const auto& [name, elapsed] : timings | std::views::take(6)) {
-			if (elapsed < 1.0)
+		for (const auto& cost : costs | std::views::take(6)) {
+			if (cost.ms < 1.0)
 				break;
-			slowest += std::format("{} {:.0f}ms  ", name, elapsed);
+			slowest += std::format("{} {:.0f}ms  ", cost.name, cost.ms);
 		}
 		if (!slowest.empty())
 			logger::info("[Setup] slowest features: {}", slowest);
+
+		std::ranges::sort(costs, std::ranges::greater{}, &FeatureCost::bytes);
+		std::string growth;
+		for (const auto& cost : costs | std::views::take(6)) {
+			if (cost.bytes < 4ll * 1024 * 1024)
+				break;
+			growth += std::format("{} {:.0f}MB  ", cost.name, static_cast<double>(cost.bytes) / (1024.0 * 1024.0));
+		}
+		if (!growth.empty())
+			logger::info("[Setup] video memory allocated: {}", growth);
 	}
 	globals::deferred->SetupResources();
 
@@ -873,12 +915,12 @@ void State::SetupResources()
 
 	auto renderer = globals::game::renderer;
 
-	permutationCB = new ConstantBuffer(ConstantBufferDesc<PermutationCB>());
-	sharedDataCB = new ConstantBuffer(ConstantBufferDesc<SharedDataCB>());
+	permutationCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<PermutationCB>());
+	sharedDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SharedDataCB>());
 
 	auto [data, size] = GetFeatureBufferData(false);
 	(void)data;
-	featureDataCB = new ConstantBuffer(ConstantBufferDesc((uint32_t)size));
+	featureDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc((uint32_t)size));
 
 	// Grab main texture to get resolution
 	D3D11_TEXTURE2D_DESC texDesc{};

@@ -112,12 +112,12 @@ public:
 	ID3D11ComputeShader* mainCompositeInteriorCS = nullptr;
 
 	// Directional shadow structured buffer (t98): cascade splits and projections.
-	Buffer* directionalShadowLights = nullptr;
+	std::unique_ptr<Buffer> directionalShadowLights;
 
 	bool deferredPass = false;
 
-	ID3D11SamplerState* linearSampler = nullptr;
-	ID3D11SamplerState* pointSampler = nullptr;
+	winrt::com_ptr<ID3D11SamplerState> linearSampler;
+	winrt::com_ptr<ID3D11SamplerState> pointSampler;
 
 private:
 	template <typename T>

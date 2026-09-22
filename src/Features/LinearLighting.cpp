@@ -116,7 +116,7 @@ void LinearLighting::RestoreDefaultSettings()
 
 void LinearLighting::SetupResources()
 {
-	PerGeometryCB = new ConstantBuffer(ConstantBufferDesc<PerGeometryData>());
+	PerGeometryCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<PerGeometryData>());
 }
 
 void LinearLighting::Prepass()

@@ -25,8 +25,8 @@ public:
 
 	bool HasShaderDefine(RE::BSShader::Type) override { return true; };
 
-	Texture2D* envIBLTexture = nullptr;
-	Texture2D* skyIBLTexture = nullptr;
+	std::unique_ptr<Texture2D> envIBLTexture;
+	std::unique_ptr<Texture2D> skyIBLTexture;
 	ID3D11ComputeShader* diffuseIBLCS = nullptr;
 
 	virtual void RestoreDefaultSettings() override;

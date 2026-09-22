@@ -78,7 +78,7 @@ void Skylighting::SetupResources()
 		precipitationOcclusion.depthSRV->GetDesc(&srvDesc);
 		precipitationOcclusion.views[0]->GetDesc(&dsvDesc);
 
-		texOcclusion = new Texture2D(texDesc, "Skylighting::Occlusion");
+		texOcclusion = std::make_unique<Texture2D>(texDesc, "Skylighting::Occlusion");
 		texOcclusion->CreateSRV(srvDesc);
 		texOcclusion->CreateDSV(dsvDesc);
 	}
@@ -111,25 +111,25 @@ void Skylighting::SetupResources()
 				.WSize = texDesc.Depth }
 		};
 
-		texProbeArray = new Texture3D(texDesc, "Skylighting::ProbeArray");
+		texProbeArray = std::make_unique<Texture3D>(texDesc, "Skylighting::ProbeArray");
 		texProbeArray->CreateSRV(srvDesc);
 		texProbeArray->CreateUAV(uavDesc);
 
 		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UINT;
 
-		texAccumFramesArray = new Texture3D(texDesc, "Skylighting::AccumFramesArray");
+		texAccumFramesArray = std::make_unique<Texture3D>(texDesc, "Skylighting::AccumFramesArray");
 		texAccumFramesArray->CreateSRV(srvDesc);
 		texAccumFramesArray->CreateUAV(uavDesc);
 
 		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_UINT;
 
-		texShadowBitmask = new Texture3D(texDesc, "Skylighting::ShadowBitmask");
+		texShadowBitmask = std::make_unique<Texture3D>(texDesc, "Skylighting::ShadowBitmask");
 		texShadowBitmask->CreateSRV(srvDesc);
 		texShadowBitmask->CreateUAV(uavDesc);
 
 		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UNORM;
 
-		texShadowVisibility = new Texture3D(texDesc, "Skylighting::ShadowVisibility");
+		texShadowVisibility = std::make_unique<Texture3D>(texDesc, "Skylighting::ShadowVisibility");
 		texShadowVisibility->CreateSRV(srvDesc);
 		texShadowVisibility->CreateUAV(uavDesc);
 	}

@@ -37,7 +37,7 @@ public:
 
 	// Specular irradiance
 
-	ID3D11SamplerState* computeSampler = nullptr;
+	winrt::com_ptr<ID3D11SamplerState> computeSampler;
 
 	struct alignas(16) SpecularMapFilterSettingsCB
 	{
@@ -47,11 +47,11 @@ public:
 	STATIC_ASSERT_ALIGNAS_16(SpecularMapFilterSettingsCB);
 
 	ID3D11ComputeShader* specularIrradianceCS = nullptr;
-	ConstantBuffer* spmapCB = nullptr;
-	Texture2D* envTexture = nullptr;
-	Texture2D* envReflectionsTexture = nullptr;
-	ID3D11UnorderedAccessView* uavArray[8];
-	ID3D11UnorderedAccessView* uavReflectionsArray[8];
+	std::unique_ptr<ConstantBuffer> spmapCB;
+	std::unique_ptr<Texture2D> envTexture;
+	std::unique_ptr<Texture2D> envReflectionsTexture;
+	winrt::com_ptr<ID3D11UnorderedAccessView> uavArray[8];
+	winrt::com_ptr<ID3D11UnorderedAccessView> uavReflectionsArray[8];
 
 	// Reflection capture
 
@@ -66,23 +66,23 @@ public:
 	ID3D11ComputeShader* updateCubemapReflectionsCS = nullptr;
 	ID3D11ComputeShader* updateCubemapFakeReflectionsCS = nullptr;
 
-	ConstantBuffer* updateCubemapCB = nullptr;
+	std::unique_ptr<ConstantBuffer> updateCubemapCB;
 
 	ID3D11ComputeShader* inferCubemapCS = nullptr;
 	ID3D11ComputeShader* inferCubemapReflectionsCS = nullptr;
 	ID3D11ComputeShader* inferCubemapFakeReflectionsCS = nullptr;
 
-	Texture2D* envCaptureTexture = nullptr;
-	Texture2D* envCaptureRawTexture = nullptr;
-	Texture2D* envCapturePositionTexture = nullptr;
+	std::unique_ptr<Texture2D> envCaptureTexture;
+	std::unique_ptr<Texture2D> envCaptureRawTexture;
+	std::unique_ptr<Texture2D> envCapturePositionTexture;
 
-	Texture2D* envCaptureReflectionsTexture = nullptr;
-	Texture2D* envCaptureRawReflectionsTexture = nullptr;
-	Texture2D* envCapturePositionReflectionsTexture = nullptr;
+	std::unique_ptr<Texture2D> envCaptureReflectionsTexture;
+	std::unique_ptr<Texture2D> envCaptureRawReflectionsTexture;
+	std::unique_ptr<Texture2D> envCapturePositionReflectionsTexture;
 
-	Texture2D* envInferredTexture = nullptr;
+	std::unique_ptr<Texture2D> envInferredTexture;
 
-	ID3D11ShaderResourceView* defaultCubemap = nullptr;
+	winrt::com_ptr<ID3D11ShaderResourceView> defaultCubemap;
 
 	bool activeReflections = false;
 	bool fakeReflections = false;
@@ -114,18 +114,18 @@ public:
 	STATIC_ASSERT_ALIGNAS_16(BC6HEncodeCB);
 
 	ID3D11ComputeShader* bc6hEncodeCS = nullptr;
-	ConstantBuffer* bc6hEncodeCB = nullptr;
+	std::unique_ptr<ConstantBuffer> bc6hEncodeCB;
 
-	ID3D11ShaderResourceView* envTextureArraySRV = nullptr;
-	ID3D11ShaderResourceView* envReflectionsTextureArraySRV = nullptr;
+	winrt::com_ptr<ID3D11ShaderResourceView> envTextureArraySRV;
+	winrt::com_ptr<ID3D11ShaderResourceView> envReflectionsTextureArraySRV;
 
-	Texture2D* envTextureBC6H = nullptr;
-	Texture2D* envReflectionsTextureBC6H = nullptr;
-	Texture2D* bc6hScratchTexture = nullptr;
+	std::unique_ptr<Texture2D> envTextureBC6H;
+	std::unique_ptr<Texture2D> envReflectionsTextureBC6H;
+	std::unique_ptr<Texture2D> bc6hScratchTexture;
 
 	uint32_t bc6hMipLevels = 0;
 
-	ID3D11UnorderedAccessView* bc6hScratchUAVs[9] = {};
+	winrt::com_ptr<ID3D11UnorderedAccessView> bc6hScratchUAVs[9];
 
 	// Editor window
 

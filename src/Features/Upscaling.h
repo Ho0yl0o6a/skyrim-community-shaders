@@ -83,7 +83,7 @@ public:
 		float pad0;
 	};
 
-	ConstantBuffer* jitterCB = nullptr;
+	std::unique_ptr<ConstantBuffer> jitterCB;
 
 	// Runtime state
 	bool isWindowed = false;
