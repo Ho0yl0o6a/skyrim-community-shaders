@@ -145,7 +145,8 @@ void ScreenSpaceShadows::DrawShadows()
 	auto uav = screenSpaceShadowsTexture->uav.get();
 	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 
-	context->CSSetSamplers(0, 1, &pointBorderSampler);
+	ID3D11SamplerState* samplers[1] = { pointBorderSampler.get() };
+	context->CSSetSamplers(0, 1, samplers);
 
 	auto buffer = raymarchCB->CB();
 	context->CSSetConstantBuffers(1, 1, &buffer);
@@ -266,7 +267,7 @@ bool ScreenSpaceShadows::HasShaderDefine(RE::BSShader::Type)
 
 void ScreenSpaceShadows::SetupResources()
 {
-	raymarchCB = new ConstantBuffer(ConstantBufferDesc<RaymarchCB>(), "SSS::RaymarchCB");
+	raymarchCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<RaymarchCB>(), "SSS::RaymarchCB");
 
 	{
 		auto device = globals::d3d::device;
@@ -283,8 +284,9 @@ void ScreenSpaceShadows::SetupResources()
 		samplerDesc.BorderColor[1] = 1.0f;
 		samplerDesc.BorderColor[2] = 1.0f;
 		samplerDesc.BorderColor[3] = 1.0f;
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &pointBorderSampler));
-		Util::SetResourceName(pointBorderSampler, "SSS::PointBorderSampler");
+		pointBorderSampler = nullptr;
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, pointBorderSampler.put()));
+		Util::SetResourceName(pointBorderSampler.get(), "SSS::PointBorderSampler");
 	}
 
 	{
@@ -307,7 +309,7 @@ void ScreenSpaceShadows::SetupResources()
 			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
 			.Texture2D = { .MipSlice = 0 }
 		};
-		screenSpaceShadowsTexture = new Texture2D(texDesc, "SSS::ShadowTexture");
+		screenSpaceShadowsTexture = std::make_unique<Texture2D>(texDesc, "SSS::ShadowTexture");
 		screenSpaceShadowsTexture->CreateSRV(srvDesc);
 		screenSpaceShadowsTexture->CreateUAV(uavDesc);
 	}

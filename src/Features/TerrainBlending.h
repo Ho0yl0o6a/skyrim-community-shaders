@@ -89,12 +89,12 @@ public:
 	/** @brief Blends the main and terrain depth buffers using a compute shader dispatch. */
 	void BlendPrepassDepths();
 
-	Texture2D* blendedDepthTexture = nullptr;
-	Texture2D* blendedDepthTexture16 = nullptr;
+	std::unique_ptr<Texture2D> blendedDepthTexture;
+	std::unique_ptr<Texture2D> blendedDepthTexture16;
 
 	RE::BSGraphics::DepthStencilData terrainDepth;
 
-	ID3D11DepthStencilState* terrainDepthStencilState = nullptr;
+	winrt::com_ptr<ID3D11DepthStencilState> terrainDepthStencilState;
 
 	ID3D11ShaderResourceView* depthSRVBackup = nullptr;
 	ID3D11ShaderResourceView* prepassSRVBackup = nullptr;

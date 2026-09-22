@@ -43,10 +43,10 @@ public:
 	 */
 	void SkyShaderHacks();
 
-	Texture2D* texCloudShadowLayers[kMaxCloudLayers] = {};
-	ID3D11RenderTargetView* cloudShadowLayerRTVs[kMaxCloudLayers][6] = {};
-	Texture2D* texCubemapCloudOccCopy = nullptr;
-	Texture2D* texSelfShadowCopy = nullptr;
+	std::unique_ptr<Texture2D> texCloudShadowLayers[kMaxCloudLayers];
+	winrt::com_ptr<ID3D11RenderTargetView> cloudShadowLayerRTVs[kMaxCloudLayers][6];
+	std::unique_ptr<Texture2D> texCubemapCloudOccCopy;
+	std::unique_ptr<Texture2D> texSelfShadowCopy;
 
 	UINT cubemapMipLevels = 1;
 	int currentLayerForDraw = 0;
@@ -55,7 +55,7 @@ public:
 	uint32_t globalRenderedMask = 0;
 	int previouslyRenderedSide = -1;
 
-	ID3D11BlendState* cloudShadowBlendState = nullptr;
+	winrt::com_ptr<ID3D11BlendState> cloudShadowBlendState;
 
 	/** @brief Creates cubemap textures, SRVs, RTVs, and blend state for cloud shadow rendering. */
 	virtual void SetupResources() override;

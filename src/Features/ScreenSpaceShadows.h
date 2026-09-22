@@ -57,12 +57,12 @@ public:
 	};
 	STATIC_ASSERT_ALIGNAS_16(RaymarchCB);
 
-	ID3D11SamplerState* pointBorderSampler = nullptr;
+	winrt::com_ptr<ID3D11SamplerState> pointBorderSampler;
 
-	ConstantBuffer* raymarchCB = nullptr;
+	std::unique_ptr<ConstantBuffer> raymarchCB;
 	ID3D11ComputeShader* raymarchCS = nullptr;
 
-	Texture2D* screenSpaceShadowsTexture = nullptr;
+	std::unique_ptr<Texture2D> screenSpaceShadowsTexture;
 
 	/** @brief Creates the raymarch constant buffer, point border sampler, and shadow output texture. */
 	virtual void SetupResources() override;

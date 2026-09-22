@@ -18,24 +18,14 @@ void VolumetricShadows::SetupResources()
 		samplerDesc.MaxAnisotropy = 1;
 		samplerDesc.MinLOD = 0;
 		samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &linearSampler));
-		Util::SetResourceName(linearSampler, "VolumetricShadows::LinearSampler");
+		linearSampler = nullptr;
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, linearSampler.put()));
+		Util::SetResourceName(linearSampler.get(), "VolumetricShadows::LinearSampler");
 	}
 
-	// Compile compute shaders
-	std::vector<std::pair<const char*, const char*>> defines;
-	defines.push_back({ "DOWNSAMPLE_SHADOW_MIP0", nullptr });
-	downsampleShadowMip0CS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\DownsampleShadowCS.hlsl", defines, "cs_5_0"));
-	defines.clear();
-	defines.push_back({ "DOWNSAMPLE_SHADOW_MIP1", nullptr });
-	downsampleShadowMip1CS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\DownsampleShadowCS.hlsl", defines, "cs_5_0"));
-
-	defines.clear();
-	defines.push_back({ "BLUR_HORIZONTAL", nullptr });
-	blurShadowHorizontalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
-	defines.clear();
-	defines.push_back({ "BLUR_VERTICAL", nullptr });
-	blurShadowVerticalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
+	// ClearShaderCache releases the previous shaders and compiles the same set, so setup
+	// delegates rather than assigning over live ones -- which leaked four shaders per resize.
+	ClearShaderCache();
 }
 
 void VolumetricShadows::ClearShaderCache()
@@ -185,7 +175,8 @@ void VolumetricShadows::CopyShadowLightData()
 					ID3D11ShaderResourceView* csSrvs[2]{ shadowView, esramDepthStencil.depthSRV };
 					context->CSSetShaderResources(0, 2, csSrvs);
 
-					context->CSSetSamplers(0, 1, &linearSampler);
+					ID3D11SamplerState* samplers[1] = { linearSampler.get() };
+					context->CSSetSamplers(0, 1, samplers);
 
 					// Dispatch covers full input: each thread gathers 2x2, 8 threads per group
 					auto dispatchSize = srcDesc.Width / 16;

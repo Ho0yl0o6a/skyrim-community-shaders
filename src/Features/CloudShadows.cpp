@@ -82,7 +82,7 @@ void CloudShadows::CheckResourcesSide(int side)
 	auto context = globals::d3d::context;
 
 	float black[4] = { 0, 0, 0, 0 };
-	context->ClearRenderTargetView(cloudShadowLayerRTVs[0][side], black);
+	context->ClearRenderTargetView(cloudShadowLayerRTVs[0][side].get(), black);
 	renderedLayersMask[side] = 0;
 }
 
@@ -171,13 +171,13 @@ void CloudShadows::SkyShaderHacks()
 		ID3D11ShaderResourceView* selfShadowSrv = texSelfShadowCopy->srv.get();
 		context->PSSetShaderResources(26, 1, &selfShadowSrv);
 
-		rtvs[3] = cloudShadowLayerRTVs[layer][side];
+		rtvs[3] = cloudShadowLayerRTVs[layer][side].get();
 		context->OMSetRenderTargets(4, rtvs, nullptr);
 
 		float blendFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 		UINT sampleMask = 0xffffffff;
 
-		context->OMSetBlendState(cloudShadowBlendState, blendFactor, sampleMask);
+		context->OMSetBlendState(cloudShadowBlendState.get(), blendFactor, sampleMask);
 
 		auto cubemapDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS];
 		context->PSSetShaderResources(17, 1, &cubemapDepth.depthSRV);
@@ -282,21 +282,22 @@ void CloudShadows::SetupResources()
 		for (int layer = 0; layer < kMaxCloudLayers; ++layer) {
 			char name[64];
 			snprintf(name, sizeof(name), "CloudShadows::Layer[%d]", layer);
-			texCloudShadowLayers[layer] = new Texture2D(texDesc, name);
+			texCloudShadowLayers[layer] = std::make_unique<Texture2D>(texDesc, name);
 			texCloudShadowLayers[layer]->CreateSRV(srvDesc);
 
 			for (int face = 0; face < 6; ++face) {
 				reflections.cubeSideRTV[face]->GetDesc(&rtvDesc);
 				rtvDesc.Format = texDesc.Format;
-				DX::ThrowIfFailed(device->CreateRenderTargetView(texCloudShadowLayers[layer]->resource.get(), &rtvDesc, &cloudShadowLayerRTVs[layer][face]));
-				Util::SetResourceName(cloudShadowLayerRTVs[layer][face], "CloudShadows::Layer[%d] RTV[%d]", layer, face);
+				cloudShadowLayerRTVs[layer][face] = nullptr;
+				DX::ThrowIfFailed(device->CreateRenderTargetView(texCloudShadowLayers[layer]->resource.get(), &rtvDesc, cloudShadowLayerRTVs[layer][face].put()));
+				Util::SetResourceName(cloudShadowLayerRTVs[layer][face].get(), "CloudShadows::Layer[%d] RTV[%d]", layer, face);
 			}
 		}
 
-		texCubemapCloudOccCopy = new Texture2D(texDesc, "CloudShadows::CubemapCloudOccCopy");
+		texCubemapCloudOccCopy = std::make_unique<Texture2D>(texDesc, "CloudShadows::CubemapCloudOccCopy");
 		texCubemapCloudOccCopy->CreateSRV(srvDesc);
 
-		texSelfShadowCopy = new Texture2D(texDesc, "CloudShadows::SelfShadowCopy");
+		texSelfShadowCopy = std::make_unique<Texture2D>(texDesc, "CloudShadows::SelfShadowCopy");
 		texSelfShadowCopy->CreateSRV(srvDesc);
 	}
 	{
@@ -313,8 +314,9 @@ void CloudShadows::SetupResources()
 		blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
 		blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 
-		DX::ThrowIfFailed(device->CreateBlendState(&blendDesc, &cloudShadowBlendState));
-		Util::SetResourceName(cloudShadowBlendState, "CloudShadows::BlendState");
+		cloudShadowBlendState = nullptr;
+		DX::ThrowIfFailed(device->CreateBlendState(&blendDesc, cloudShadowBlendState.put()));
+		Util::SetResourceName(cloudShadowBlendState.get(), "CloudShadows::BlendState");
 	}
 }
 

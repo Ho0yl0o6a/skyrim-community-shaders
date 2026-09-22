@@ -155,7 +155,7 @@ public:
 
 	StrictLightDataCB strictLightDataTemp;
 
-	ConstantBuffer* strictLightDataCB = nullptr;
+	std::unique_ptr<ConstantBuffer> strictLightDataCB;
 
 	bool previousEnableLightsVisualisation = settings.EnableLightsVisualisation;
 	bool currentEnableLightsVisualisation = settings.EnableLightsVisualisation;
@@ -163,8 +163,8 @@ public:
 	ID3D11ComputeShader* clusterBuildingCS = nullptr;
 	ID3D11ComputeShader* clusterCullingCS = nullptr;
 
-	ConstantBuffer* lightBuildingCB = nullptr;
-	ConstantBuffer* lightCullingCB = nullptr;
+	std::unique_ptr<ConstantBuffer> lightBuildingCB;
+	std::unique_ptr<ConstantBuffer> lightCullingCB;
 
 	eastl::unique_ptr<Buffer> lights = nullptr;
 	eastl::unique_ptr<Buffer> clusters = nullptr;

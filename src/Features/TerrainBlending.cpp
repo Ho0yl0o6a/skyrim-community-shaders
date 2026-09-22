@@ -67,6 +67,21 @@ void TerrainBlending::SetupResources()
 	{
 		auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 
+		// terrainDepth is a game struct of raw pointers, so setup has to release the previous
+		// set itself: it re-runs on every render-target rebuild, and the views pin the texture.
+		if (terrainDepth.views[0]) {
+			terrainDepth.views[0]->Release();
+			terrainDepth.views[0] = nullptr;
+		}
+		if (terrainDepth.depthSRV) {
+			terrainDepth.depthSRV->Release();
+			terrainDepth.depthSRV = nullptr;
+		}
+		if (terrainDepth.texture) {
+			terrainDepth.texture->Release();
+			terrainDepth.texture = nullptr;
+		}
+
 		D3D11_TEXTURE2D_DESC texDesc;
 		mainDepth.texture->GetDesc(&texDesc);
 		DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, NULL, &terrainDepth.texture));
@@ -91,7 +106,7 @@ void TerrainBlending::SetupResources()
 		texDesc.Format = DXGI_FORMAT_R32_FLOAT;
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
-		blendedDepthTexture = new Texture2D(texDesc, "TerrainBlending::BlendedDepth");
+		blendedDepthTexture = std::make_unique<Texture2D>(texDesc, "TerrainBlending::BlendedDepth");
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 		main.SRV->GetDesc(&srvDesc);
@@ -107,7 +122,7 @@ void TerrainBlending::SetupResources()
 		srvDesc.Format = texDesc.Format;
 		uavDesc.Format = texDesc.Format;
 
-		blendedDepthTexture16 = new Texture2D(texDesc, "TerrainBlending::BlendedDepth16");
+		blendedDepthTexture16 = std::make_unique<Texture2D>(texDesc, "TerrainBlending::BlendedDepth16");
 		blendedDepthTexture16->CreateSRV(srvDesc);
 		blendedDepthTexture16->CreateUAV(uavDesc);
 
@@ -124,8 +139,9 @@ void TerrainBlending::SetupResources()
 		depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
 		depthStencilDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
 		depthStencilDesc.StencilEnable = false;
-		DX::ThrowIfFailed(device->CreateDepthStencilState(&depthStencilDesc, &terrainDepthStencilState));
-		Util::SetResourceName(terrainDepthStencilState, "TerrainBlending::DepthStencilState");
+		terrainDepthStencilState = nullptr;
+		DX::ThrowIfFailed(device->CreateDepthStencilState(&depthStencilDesc, terrainDepthStencilState.put()));
+		Util::SetResourceName(terrainDepthStencilState.get(), "TerrainBlending::DepthStencilState");
 	}
 }
 
@@ -388,7 +404,7 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 		stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 
 		// Enable rendering for depth below the surface
-		context->OMSetDepthStencilState(terrainDepthStencilState, 0xFF);
+		context->OMSetDepthStencilState(terrainDepthStencilState.get(), 0xFF);
 
 		for (auto& renderPass : terrainRenderPasses)
 			Hooks::BSBatchRenderer__RenderPassImmediately::func(renderPass.a_pass, renderPass.a_technique, renderPass.a_alphaTest, renderPass.a_renderFlags);

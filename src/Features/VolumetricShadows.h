@@ -56,7 +56,7 @@ public:
 	ID3D11UnorderedAccessView* shadowBlurTempMip1UAV = nullptr;
 
 	// Samplers
-	ID3D11SamplerState* linearSampler = nullptr;
+	winrt::com_ptr<ID3D11SamplerState> linearSampler;
 
 	/** @brief Draws the ImGui settings panel for volumetric shadows. */
 	virtual void DrawSettings() override;

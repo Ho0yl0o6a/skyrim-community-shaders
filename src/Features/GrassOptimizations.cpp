@@ -643,7 +643,10 @@ void GrassOptimizations::SetupResources()
 	hiZ.SetupResources();
 	bucketStore.SetupResources();
 
-	if (FAILED(globals::d3d::context->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) || !ctx1) {
+	// Setup re-runs on every render-target rebuild and QueryInterface AddRefs, so the previous
+	// reference has to go or each resize leaks one on the immediate context.
+	ctx1 = nullptr;
+	if (FAILED(globals::d3d::context->QueryInterface(__uuidof(ID3D11DeviceContext1), ctx1.put_void())) || !ctx1) {
 		logger::error("[GRASS OPTIMIZATIONS] ID3D11DeviceContext1 unavailable — feature disabled");
 		ctx1 = nullptr;
 	}

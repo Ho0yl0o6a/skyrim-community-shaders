@@ -169,7 +169,7 @@ public:
 
 	uint32_t lastFrame = UINT32_MAX;
 
-	ID3D11DeviceContext1* ctx1 = nullptr;
+	winrt::com_ptr<ID3D11DeviceContext1> ctx1;
 
 	ID3D11ComputeShader* cullCS = nullptr;
 

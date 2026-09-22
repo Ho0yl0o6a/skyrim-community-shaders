@@ -95,12 +95,12 @@ void LightLimitFix::SetupResources()
 	uint clusterCount = clusterSize[0] * clusterSize[1] * clusterSize[2];
 
 	{
-		std::vector<std::pair<const char*, const char*>> clusterDefines;
-		clusterBuildingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterBuildingCS.hlsl", clusterDefines, "cs_5_0");
-		clusterCullingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterCullingCS.hlsl", clusterDefines, "cs_5_0");
+		// ClearShaderCache releases the previous pair before compiling the same two, so setup
+		// delegates rather than assigning over live ones.
+		ClearShaderCache();
 
-		lightBuildingCB = new ConstantBuffer(ConstantBufferDesc<LightBuildingCB>());
-		lightCullingCB = new ConstantBuffer(ConstantBufferDesc<LightCullingCB>());
+		lightBuildingCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<LightBuildingCB>());
+		lightCullingCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<LightCullingCB>());
 	}
 
 	{
@@ -178,7 +178,7 @@ void LightLimitFix::SetupResources()
 	}
 
 	{
-		strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>());
+		strictLightDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<StrictLightDataCB>());
 	}
 }
 
