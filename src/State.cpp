@@ -1,6 +1,8 @@
 #include "State.h"
 
+#include <algorithm>
 #include <codecvt>
+#include <ranges>
 
 #include <pystring/pystring.h>
 
@@ -291,7 +293,27 @@ void State::Setup()
 	// gating logic that wants to read the log can run during feature SetupResources.
 	CheckTypedUAVLoadSupport();
 
-	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
+	// The game re-runs this on every render-target rebuild, i.e. on every window resize. A
+	// feature that reloads from disk here shows up as a multi-second freeze on alt-tab, so name
+	// the expensive ones rather than leaving the cost anonymous.
+	{
+		std::vector<std::pair<std::string, double>> timings;
+		Feature::ForEachLoadedFeature("SetupResources", [&](Feature* feature) {
+			const auto start = std::chrono::steady_clock::now();
+			feature->SetupResources();
+			timings.emplace_back(feature->GetShortName(),
+				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+		});
+		std::ranges::sort(timings, std::ranges::greater{}, &std::pair<std::string, double>::second);
+		std::string slowest;
+		for (const auto& [name, elapsed] : timings | std::views::take(6)) {
+			if (elapsed < 1.0)
+				break;
+			slowest += std::format("{} {:.0f}ms  ", name, elapsed);
+		}
+		if (!slowest.empty())
+			logger::info("[Setup] slowest features: {}", slowest);
+	}
 	globals::deferred->SetupResources();
 
 	// Load per-weather settings after features are setup
@@ -780,6 +802,12 @@ void State::CheckTypedUAVLoadSupport()
 		logger::warn("[TypedUAVLoad] Device unavailable; skipping format support probe.");
 		return;
 	}
+
+	// A device capability, so it cannot change while the device lives. Setup re-runs on every
+	// render-target rebuild, and re-probing there only reprints the same eight lines.
+	static ID3D11Device* s_probedDevice = nullptr;
+	if (std::exchange(s_probedDevice, device) == device)
+		return;
 
 	// Formats this codebase does typed UAV loads on (RWTexture<T> read via subscript).
 	// Identified by static analysis; keep in sync with new typed reads.
