@@ -8,6 +8,7 @@
 #include "Effects11/MenuManager.h"
 #include "Effects11/PresetManager.h"
 #include "Effects11/SettingManager.h"
+#include "Effects11/TextureManager.h"
 #include "Effects11/WeatherManager.h"
 
 #include "CloudShadows.h"
@@ -184,8 +185,19 @@ void Effects11::LoadRaindropTexture()
 
 void Effects11::SetupResources()
 {
+	// This runs again every time the game rebuilds its render targets, which it does on every
+	// window resize -- including the collapse to nothing on minimize. Only the display-sized
+	// textures actually depend on that: the preset, its .fx sources and the shared GPU state do
+	// not, and reloading them costs around three seconds, which is what an alt-tab used to feel
+	// like.
+	auto& effects = EffectManager::GetSingleton();
+	if (effects.IsInitialized()) {
+		TextureManager::GetSingleton().CreateScreenTextures();
+		return;
+	}
+
 	// Initialize() -> Apply() already loads the raindrop texture; do not load it again here.
-	EffectManager::GetSingleton().Initialize();
+	effects.Initialize();
 }
 
 void Effects11::ClearShaderCache()

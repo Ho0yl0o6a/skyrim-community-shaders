@@ -27,6 +27,10 @@ public:
 	static TextureManager& GetSingleton();
 
 	void Initialize();
+
+	/** @brief Recreates only the display-sized textures, for a resolution change. */
+	void CreateScreenTextures();
+
 	Texture* GetCommonTexture(const std::string& name);
 
 	void SwapTextures(const std::string& name1, const std::string& name2);
