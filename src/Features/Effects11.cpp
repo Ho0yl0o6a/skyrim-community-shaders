@@ -778,7 +778,7 @@ void Effects11::DrawVolumetricRays()
 	Effects11Util::D3D11ScopedPostFxBackup stateBackup;
 	stateBackup.Save(context);
 
-	ID3D11SamplerState* sampler = Deferred::GetSingleton()->linearSampler;
+	ID3D11SamplerState* sampler = Deferred::GetSingleton()->linearSampler.get();
 	D3D11_VIEWPORT viewport{ 0, 0, resolution.x, resolution.y, 0, 1 };
 	D3D11_VIEWPORT halfViewport{ 0, 0, static_cast<float>(halfDynWidth), static_cast<float>(halfDynHeight), 0, 1 };
 

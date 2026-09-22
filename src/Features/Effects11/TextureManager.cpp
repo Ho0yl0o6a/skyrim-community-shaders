@@ -66,12 +66,26 @@ void TextureManager::CreateScreenTextures()
 {
 	const UINT screenWidth = globals::game::graphicsState->screenWidth;
 	const UINT screenHeight = globals::game::graphicsState->screenHeight;
-	if (screenWidth == 0 || screenHeight == 0)
+
+	// Minimizing collapses the client area and the game rebuilds its render targets at 1x1. These
+	// textures are ours, not the game's, so nothing forces them to follow: keeping them at the
+	// last real size means the restore finds them already correct and rebuilds nothing. Resizing
+	// down and back up instead churned ~130 MB across every alt-tab.
+	if (screenWidth <= 1 || screenHeight <= 1)
 		return;
 
-	// insert_or_assign, not insert: these are recreated whenever the display resolution changes,
-	// and insert would keep the old entry, leaving every effect sampling a stale-sized texture.
+	// Keep an entry that already matches. This runs again on every render-target rebuild, and a
+	// minimize/restore does not change the resolution, so recreating unconditionally churned
+	// ~130 MB of textures per alt-tab for no reason. Recreating only on an actual size or format
+	// change also preserves the fix this split was for: insert alone would have kept a
+	// stale-sized texture after a genuine resolution change.
 	const auto add = [&](const char* a_name, DXGI_FORMAT a_format) {
+		if (auto it = commonTextureCache.find(a_name); it != commonTextureCache.end() && it->second.texture) {
+			D3D11_TEXTURE2D_DESC existing{};
+			it->second.texture->GetDesc(&existing);
+			if (existing.Width == screenWidth && existing.Height == screenHeight && existing.Format == a_format)
+				return;
+		}
 		commonTextureCache.insert_or_assign(a_name,
 			CreateTexture(screenWidth, screenHeight, a_format, std::string("TextureManager::") + a_name));
 	};
