@@ -224,7 +224,22 @@ public:
 		ID3D11UnorderedAccessView* UAV = nullptr;
 	};
 
-	std::vector<std::pair<RE::RENDER_TARGETS::RENDER_TARGET, SavedRenderTarget>> savedLDRTargets;
+	/**
+	 * @brief One LDR target swapped for a float one: what was there, and what we put in its place.
+	 *
+	 * The replacement has to be recorded, not just read back out of the render target on restore.
+	 * The game rebuilds its render targets on every window resize, and it does so before our setup
+	 * runs, so by then the slot holds the game's new texture and ours is unreachable -- releasing
+	 * whatever the slot happens to hold would leak ours and free the game's.
+	 */
+	struct UpgradedRenderTarget
+	{
+		RE::RENDER_TARGETS::RENDER_TARGET target{};
+		SavedRenderTarget original;
+		SavedRenderTarget replacement;
+	};
+
+	std::vector<UpgradedRenderTarget> savedLDRTargets;
 
 private:
 	bool showHDRWarningPopup = false;

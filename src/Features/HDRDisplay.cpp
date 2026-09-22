@@ -1347,7 +1347,7 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 		rt.SRV = newSRV;
 		rt.UAV = newUAV;
 
-		savedLDRTargets.push_back({ targetId, saved });
+		savedLDRTargets.push_back({ targetId, saved, SavedRenderTarget{ newTexture, newRTV, newSRV, newUAV } });
 		logger::info("[HDR] Upgraded render target {} to R16G16B16A16_FLOAT (was format {})", static_cast<int>(targetId), static_cast<int>(origDesc.Format));
 	}
 }
@@ -1356,22 +1356,41 @@ void HDRDisplay::RestoreLDRRenderTargets()
 {
 	auto renderer = globals::game::renderer;
 
-	for (auto& [targetId, saved] : savedLDRTargets) {
+	for (auto& [targetId, original, replacement] : savedLDRTargets) {
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
 
-		if (rt.texture)
-			rt.texture->Release();
-		if (rt.RTV)
-			rt.RTV->Release();
-		if (rt.SRV)
-			rt.SRV->Release();
-		if (rt.UAV)
-			rt.UAV->Release();
+		// Upgrading moved the original out of the slot without releasing it, so this list holds
+		// the only reference to it, and installed our replacement in its place -- which the slot
+		// now owns.
+		if (rt.texture == replacement.texture) {
+			// Still ours: give the slot its original back and release what we put there.
+			if (replacement.UAV)
+				replacement.UAV->Release();
+			if (replacement.SRV)
+				replacement.SRV->Release();
+			if (replacement.RTV)
+				replacement.RTV->Release();
+			if (replacement.texture)
+				replacement.texture->Release();
 
-		rt.texture = saved.texture;
-		rt.RTV = saved.RTV;
-		rt.SRV = saved.SRV;
-		rt.UAV = saved.UAV;
+			rt.texture = original.texture;
+			rt.RTV = original.RTV;
+			rt.SRV = original.SRV;
+			rt.UAV = original.UAV;
+		} else {
+			// The game rebuilt this target underneath us, which it does on every window resize
+			// and before our setup runs. It released our replacement along with the slot, so
+			// touching that again is a double free. What is left stranded is the original we are
+			// still holding -- seven full-screen targets per rebuild, the alt-tab leak.
+			if (original.UAV)
+				original.UAV->Release();
+			if (original.SRV)
+				original.SRV->Release();
+			if (original.RTV)
+				original.RTV->Release();
+			if (original.texture)
+				original.texture->Release();
+		}
 	}
 	savedLDRTargets.clear();
 }
