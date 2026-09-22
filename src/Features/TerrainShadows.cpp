@@ -289,26 +289,32 @@ void TerrainShadows::ParseHeightmapPath(std::filesystem::path p, bool xlodgen_st
 
 void TerrainShadows::SetupResources()
 {
-	logger::debug("Listing xLODGen height maps...");
-	{
-		std::filesystem::path texture_dir{ L"Data\\textures\\Terrain\\" };
-		std::error_code ec;
-		for (auto const& dir_entry : std::filesystem::directory_iterator{ texture_dir, ec }) {
-			auto dir_path = dir_entry.path();
-			if (!std::filesystem::is_directory(dir_path))
-				continue;
+	// Walking the texture tree is disk work that does not depend on the render targets, and this
+	// runs again on every window resize. Repeating it also re-reported every worldspace as having
+	// more than one height map, because the map it checks against is the one it just filled.
+	static bool s_heightmapsListed = false;
+	if (!std::exchange(s_heightmapsListed, true)) {
+		logger::debug("Listing xLODGen height maps...");
+		{
+			std::filesystem::path texture_dir{ L"Data\\textures\\Terrain\\" };
+			std::error_code ec;
+			for (auto const& dir_entry : std::filesystem::directory_iterator{ texture_dir, ec }) {
+				auto dir_path = dir_entry.path();
+				if (!std::filesystem::is_directory(dir_path))
+					continue;
 
-			for (auto const& sub_dir_entry : std::filesystem::directory_iterator{ dir_path })
-				ParseHeightmapPath(sub_dir_entry.path(), true);
+				for (auto const& sub_dir_entry : std::filesystem::directory_iterator{ dir_path })
+					ParseHeightmapPath(sub_dir_entry.path(), true);
+			}
 		}
-	}
 
-	logger::debug("Listing height maps...");
-	{
-		std::filesystem::path texture_dir{ L"Data\\textures\\heightmaps\\" };
-		std::error_code ec;
-		for (auto const& dir_entry : std::filesystem::directory_iterator{ texture_dir, ec })
-			ParseHeightmapPath(dir_entry.path(), false);
+		logger::debug("Listing height maps...");
+		{
+			std::filesystem::path texture_dir{ L"Data\\textures\\heightmaps\\" };
+			std::error_code ec;
+			for (auto const& dir_entry : std::filesystem::directory_iterator{ texture_dir, ec })
+				ParseHeightmapPath(dir_entry.path(), false);
+		}
 	}
 
 	logger::debug("Creating constant buffers...");
