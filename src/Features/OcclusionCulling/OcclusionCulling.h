@@ -1,0 +1,103 @@
+#pragma once
+
+#include "Feature.h"
+
+#include <RE/B/BSTEvent.h>
+#include <RE/M/MenuOpenCloseEvent.h>
+
+// -----------------------------------------------------------------------------
+// OcclusionCulling — CommunityShaders Feature wrapper around the MOC port.
+//
+// V1: installs a hook on BSCullingProcess so that (a) once per frame, before the
+// main cull walk, the MOC depth buffer is rebuilt from large static occluders, and
+// (b) each processed scene object is occlusion-tested and skipped if provably
+// hidden. Everything is gated behind the feature settings AND the env var
+// CS_OCCLUSION=1 (off by default).
+//
+// SE 1.5.97 ONLY.
+// -----------------------------------------------------------------------------
+
+struct OcclusionCulling : public Feature
+{
+	static OcclusionCulling* GetSingleton()
+	{
+		static OcclusionCulling singleton;
+		return &singleton;
+	}
+
+	struct Settings
+	{
+		// Off until asked for. The header above says the feature is gated behind the settings
+		// AND CS_OCCLUSION=1, but defaulting this to true made the env var meaningless and any
+		// A/B measured culling against culling.
+		bool  EnableOcclusionTesting = false;
+		bool  EnableOccluderRendering = true;
+		float OccluderMaxDistance = 20000.0f;
+		float OccluderFirstLevelMinSize = 200.0f;
+		// Raster budget per frame, closest-first (not a MOC library limit). With the
+		// threaded raster + simplified meshes the default covers typical scenes fully.
+		std::int32_t MaxOccludersPerFrame = 384;
+		// CullingThreadpool worker count; applied at boot (pool is created once).
+		std::int32_t RasterThreads = 4;
+		// meshopt_simplify occluder meshes at cache time (~half the indices). Off here:
+		// meshopt_simplifySloppy faults on this runtime's decoded geometry (AV inside
+		// GetCachedGeometry on a garbage pointer), so the occluders are rasterized at full
+		// resolution until the decode is proven to hand meshopt valid input.
+		bool SimplifyOccluders = false;
+		// Only objects with at least this world-bound radius are occlusion-tested.
+		float OccluderTestMinRadius = 0.0f;
+		// Neutralize vanilla occlusion planes: MOC is the only occlusion mechanism.
+		bool ExclusiveOcclusion = false;
+		bool CullTreeLOD = false;   // measured net cost at open venues; enable for dense forests
+		bool TreeOccluders = false;  // measured net cost at open venues; enable for dense forests
+		bool AlphaTestedOccluders = false;
+		bool  CullSunShadows = false;  // venue/time-conditional occlusion; experimental
+		bool  CullSmallShadows = true;   // distance-scaled small-caster contribution cull (HZD-style)
+		float ShadowCullNearRadius = 32.0f;
+		float ShadowCullDistSlope = 0.012f;
+		// Gather leaf gate: occluder meshes smaller than this are not rasterized.
+		float OccluderMinLeafSize = 100.0f;
+	};
+
+	Settings settings;
+
+	// Master runtime gate, driven by the CS_OCCLUSION=1 env var (read once at load).
+	// When false, the installed hooks are inert pass-throughs.
+	bool envEnabled = false;
+
+	// DIAGNOSTIC (env CS_MOC_FORCE_CULL, never persisted): force-cull % of kept objects.
+	std::int32_t diagForceCullPercent = 0;
+
+	virtual std::string GetName() override { return "Occlusion Culling"; }
+	virtual std::string GetShortName() override { return "OcclusionCulling"; }
+
+	/** @brief Installs the BSCullingProcess hooks and creates the MOC instance. */
+	virtual void PostPostLoad() override;
+
+	/** @brief Render-thread hook: env-gated verification dumps (CS_MOC_DUMP=1). */
+	virtual void Prepass() override;
+
+	/** @brief Menu open/close sink: quiesces the builder before scene teardown (loading screens). */
+	class MenuEventSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
+	{
+	public:
+		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
+	};
+
+	virtual void DrawSettings() override;
+
+	virtual void LoadSettings(json& o_json) override;
+	virtual void SaveSettings(json& o_json) override;
+	virtual void RestoreDefaultSettings() override;
+
+	// This feature has no shader .ini, so it is force-loaded in PostPostLoad. Neutralize
+	// the disk-cache machinery (which assumes an ini version) so it can't crash/invalidate.
+	virtual bool ValidateCache(CSimpleIniA&) override { return true; }
+	virtual void WriteDiskCacheInfo(CSimpleIniA&) override {}
+
+	/** @brief Pushes the current settings into the MOC runtime globals. */
+	void SyncSettingsToMOC();
+
+	/** @brief True when the master env gate + testing setting are both on. */
+	bool IsActive() const;
+};

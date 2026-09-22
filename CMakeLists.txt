@@ -162,6 +162,15 @@ if(AFTERMATH)
     target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:GFSDK_Aftermath_Lib.x64.dll")
 endif()
 
+# Intel Masked Software Occlusion Culling -- the CPU depth-rasterizer and TestRect backing the
+# OcclusionCulling feature (Nukem-style software occlusion). Builds a static lib with per-file
+# /arch flags; AVX-512 stays off. See src/Features/OcclusionCulling/.
+add_subdirectory(${CMAKE_SOURCE_DIR}/extern/MaskedOcclusionCulling)
+
+# meshoptimizer -- occluder mesh LOD simplification for the OcclusionCulling feature
+# (meshopt_simplify to roughly a third of the triangles before CPU rasterization).
+add_subdirectory(${CMAKE_SOURCE_DIR}/extern/meshoptimizer)
+
 # Streamline is linked as headers and loaded through its Vulkan interposer at runtime.
 add_subdirectory(${CMAKE_SOURCE_DIR}/cmake/Streamline)
 
@@ -191,6 +200,8 @@ target_include_directories(
         ${CLIB_UTIL_INCLUDE_DIRS}
         "${CMAKE_SOURCE_DIR}/package/Shaders"
         "${CMAKE_SOURCE_DIR}/extern/sk_hdr_png/include"
+        # MaskedOcclusionCulling and meshoptimizer are included by <MaskedOcclusionCulling/...>
+        "${CMAKE_SOURCE_DIR}/extern"
         ${DETOURS_INCLUDE_DIRS}
 )
 
@@ -221,6 +232,8 @@ target_link_libraries(
         dbghelp
         Vulkan::Vulkan
         Streamline
+        MaskedOcclusionCulling
+        meshoptimizer
 )
 
 # devbench bridge: opt-out via -DDEVBENCH_BRIDGE=OFF. When off, the port isn't required

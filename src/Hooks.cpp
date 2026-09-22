@@ -20,6 +20,7 @@
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
 #include "Features/LightLimitFix.h"
+#include "Features/OcclusionCulling/MOC.h"
 #include "Features/ScreenshotFeature.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
@@ -390,6 +391,7 @@ struct IDXGISwapChain_Present
 	{
 		globals::state->Reset();
 		D3D11CallFilter::OnPresent();
+		MOC::BeginFrame();
 
 		// DLSS-G on Vulkan requires SyncInterval 0.
 		{

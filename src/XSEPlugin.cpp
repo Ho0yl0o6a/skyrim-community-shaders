@@ -13,6 +13,7 @@
 #include "SceneSettingsManager.h"
 #include "ShaderCache.h"
 #include "State.h"
+#include "Features/OcclusionCulling/OcclusionCulling.h"
 
 
 #define DLLEXPORT __declspec(dllexport)
@@ -133,6 +134,11 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				Hooks::Install();
 				EngineFix::InstallOnPostPostLoadFixes();
 				FrameAnnotations::OnPostPostLoad();
+
+				// Occlusion Culling installs its BSCullingProcess detours here. Not routed
+				// through the Feature loader -- it has no shaders or ini -- so it is a direct
+				// install like EngineFix. Inert unless CS_OCCLUSION=1.
+				OcclusionCulling::GetSingleton()->PostPostLoad();
 
 				auto shaderCache = globals::shaderCache;
 
