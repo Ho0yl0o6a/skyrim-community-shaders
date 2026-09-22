@@ -391,6 +391,24 @@ struct IDXGISwapChain_Present
 		globals::state->Reset();
 		HiZCull::BeginFrame();
 
+		// DIAG (CS_VRAM_TRACE=1): log video memory whenever it moves, to see which phase of a
+		// window resize the growth appears in and whether any of it is ever handed back. Sampling
+		// only at the edges of a minimize/restore cannot tell those apart.
+		static const bool s_traceVram = [] {
+			char buf[8] = {};
+			return GetEnvironmentVariableA("CS_VRAM_TRACE", buf, sizeof(buf)) && buf[0] == '1';
+		}();
+		if (s_traceVram) {
+			static std::int64_t s_lastLogged = 0;
+			const auto used = State::VideoMemoryInUse();
+			if (std::abs(used - s_lastLogged) > 8ll * 1024 * 1024) {
+				logger::info("[VRAMTrace] {:.0f} MB ({:+.0f})",
+					static_cast<double>(used) / (1024.0 * 1024.0),
+					static_cast<double>(used - s_lastLogged) / (1024.0 * 1024.0));
+				s_lastLogged = used;
+			}
+		}
+
 		// DLSS-G on Vulkan requires SyncInterval 0.
 		{
 			auto& up = globals::features::upscaling;
