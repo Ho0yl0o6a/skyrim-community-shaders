@@ -650,6 +650,23 @@ struct BSShaderRenderTargets_Create
 		logger::info("[RenderTargets] rebuilt at {}x{}: game {:.0f} ms / {:.0f} MB, feature setup {:.0f} ms",
 			gs ? gs->screenWidth : 0u, gs ? gs->screenHeight : 0u, ms(t1 - t0),
 			static_cast<double>(gameVramBytes) / (1024.0 * 1024.0), ms(t2 - t1));
+
+		// What DXVK itself thinks it is holding. Committed memory growing while the memory
+		// actually in use stays flat is fragmentation or retained chunks; both growing together
+		// is a genuine leak. The process-wide counter cannot tell those apart.
+		using DxvkGetMemoryStatsFn = void (*)(std::uint64_t*, std::uint64_t*, std::uint64_t*);
+		static const auto dxvkGetMemoryStats = [] {
+			if (HMODULE module = GetModuleHandleW(L"dxvk_d3d11.dll"))
+				return reinterpret_cast<DxvkGetMemoryStatsFn>(GetProcAddress(module, "dxvkGetMemoryStats"));
+			return static_cast<DxvkGetMemoryStatsFn>(nullptr);
+		}();
+		if (dxvkGetMemoryStats) {
+			std::uint64_t allocated = 0, used = 0, budget = 0;
+			dxvkGetMemoryStats(&allocated, &used, &budget);
+			const auto toMB = [](std::uint64_t a_bytes) { return static_cast<double>(a_bytes) / (1024.0 * 1024.0); };
+			logger::info("[RenderTargets] dxvk memory: allocated {:.0f} MB, used {:.0f} MB, budget {:.0f} MB",
+				toMB(allocated), toMB(used), toMB(budget));
+		}
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
