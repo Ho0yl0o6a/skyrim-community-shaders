@@ -2,14 +2,18 @@ param(
   [string]$Label = "pacing",
   [string]$Settings = "SettingsUser.fg_unlocked.json",
   [int]$WarmSeconds = 40,
-  [int]$CaptureSeconds = 20
+  [int]$CaptureSeconds = 20,
+  # Where the settings preset, PresentMon-2.5.1-x64.exe and the output CSVs live.
+  [string]$WorkDir = $PSScriptRoot,
+  [string]$GameDir = $env:SkyrimSEDir
 )
 $ErrorActionPreference = 'Stop'
 # PresentMon writes its privilege warning to stderr, and PowerShell 5.1 turns native
 # stderr into a terminating NativeCommandError under Stop. That killed an earlier
 # capture after the whole load-and-settle cycle had already run.
-$G   = 'I:\SteamLibrary\steamapps\common\Skyrim Special Edition'
-$SCR = 'F:\claudetmp\claude\J--hdresreach\5898b011-4161-48ee-8d41-d13ca41c0ac9\scratchpad'
+if (-not $GameDir) { throw "Set -GameDir or the SkyrimSEDir environment variable to the Skyrim Special Edition folder" }
+$G   = $GameDir
+$SCR = $WorkDir
 
 Get-Process SkyrimSE, skse64_loader -EA SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 4
