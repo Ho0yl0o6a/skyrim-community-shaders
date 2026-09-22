@@ -186,6 +186,9 @@ public:
 	 * warn line per unsupported format with the feature that needs it.
 	 */
 	void CheckTypedUAVLoadSupport();
+
+	/** @brief Video memory currently in use by this process in bytes, or 0 if unavailable. */
+	static std::int64_t VideoMemoryInUse();
 	/**
 	 * @brief Strips and rewrites shader descriptor bits for Community Shaders' pipeline.
 	 * @param a_shader The shader being compiled.

@@ -281,8 +281,7 @@ void State::Reset()
 	activeReflections = false;
 }
 
-// Video memory currently in use by this process, or 0 when it cannot be read.
-static std::int64_t VideoMemoryInUse()
+std::int64_t State::VideoMemoryInUse()
 {
 	static winrt::com_ptr<IDXGIAdapter3> adapter;
 	if (!adapter) {

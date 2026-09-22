@@ -612,9 +612,11 @@ struct BSShaderRenderTargets_Create
 	{
 		Util::SetGameSettingValue<std::int32_t>("iNumFocusShadow:Display", iNumFocusShadow, 0);
 
+		const auto vramBeforeGame = State::VideoMemoryInUse();
 		const auto t0 = std::chrono::steady_clock::now();
 		func();
 		const auto t1 = std::chrono::steady_clock::now();
+		const auto gameVramBytes = State::VideoMemoryInUse() - vramBeforeGame;
 		globals::ReInit();
 
 		// Setup has to run even for the 1x1 targets a minimize produces: the game has destroyed
@@ -627,8 +629,9 @@ struct BSShaderRenderTargets_Create
 		// alt-tab. Log the cost: it is the difference between a seamless switch and a freeze.
 		const auto ms = [](auto a_d) { return std::chrono::duration<double, std::milli>(a_d).count(); };
 		const auto* gs = globals::game::graphicsState;
-		logger::info("[RenderTargets] rebuilt at {}x{}: game {:.0f} ms, feature setup {:.0f} ms",
-			gs ? gs->screenWidth : 0u, gs ? gs->screenHeight : 0u, ms(t1 - t0), ms(t2 - t1));
+		logger::info("[RenderTargets] rebuilt at {}x{}: game {:.0f} ms / {:.0f} MB, feature setup {:.0f} ms",
+			gs ? gs->screenWidth : 0u, gs ? gs->screenHeight : 0u, ms(t1 - t0),
+			static_cast<double>(gameVramBytes) / (1024.0 * 1024.0), ms(t2 - t1));
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
