@@ -15,6 +15,8 @@
 #include "Features/TerrainBlending.h"
 #include "Features/Upscaling.h"
 #include "Features/CSEditor.h"
+#include "Features/OcclusionCulling/HiZCull.h"
+#include "Features/OcclusionCulling/HiZReadback.h"
 
 #include "Hooks.h"
 
@@ -245,6 +247,37 @@ void Deferred::PrepassPasses()
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
 	Feature::ForEachLoadedFeature("Prepass", [](Feature* feature) { feature->Prepass(); }, true);
+}
+
+void Deferred::BuildHiZ()
+{
+	ZoneScoped;
+
+	// Nothing consumes it unless occlusion culling is on, and the dispatches are not free.
+	if (!HiZCull::EnableOcclusionTesting) {
+		hiZ.Invalidate();
+		return;
+	}
+
+	auto* device = globals::d3d::device;
+	auto* context = globals::d3d::context;
+	if (!device || !context)
+		return;
+
+	static bool s_setup = false;
+	if (!s_setup) {
+		hiZ.SetupResources();
+		s_setup = true;
+	}
+
+	TracyD3D11Zone(globals::state->tracyCtx, "Shared HiZ");
+
+	if (!hiZ.Build(device, context)) {
+		hiZ.Invalidate();
+		return;
+	}
+
+	HiZReadback::Update(device, context, hiZ);
 }
 
 void Deferred::StartDeferred()
@@ -692,6 +725,10 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	auto depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 
 	context->CopyResource(depthCopy.texture, depth.texture);
+
+	// Opaque depth is complete and water has not touched it yet: the earliest point where the
+	// buffer describes everything that can occlude.
+	deferred->BuildHiZ();
 
 	// After this point, water starts rendering
 };

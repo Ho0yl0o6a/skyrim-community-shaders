@@ -1,41 +1,28 @@
 #include "OcclusionCulling.h"
 
-#include "MOC.h"
+#include "HiZCull.h"
+#include "HiZReadback.h"
 
 #include "Globals.h"
+#include "Utils/UI.h"
 
 #include <RE/B/BSCullingProcess.h>
-#include <RE/L/LoadingMenu.h>
-#include <RE/U/UI.h>
 #include <RE/B/BSMultiBound.h>
 #include <RE/B/BSParabolicCullingProcess.h>
 #include <RE/N/NiAVObject.h>
 #include <RE/N/NiCamera.h>
-#include <RE/S/State.h>
-
-#include <atomic>
 
 #include <imgui.h>
 
+#define I18N_KEY_PREFIX "feature.occlusion_culling."
+
 namespace
 {
-	// The culling-process instance currently running a MAIN-camera cull (nullptr when
-	// none). Per-object Process1 calls are occlusion-tested only when their process
-	// matches. Instance-keyed rather than a bool because culls run CONCURRENTLY (the
-	// main scene cull executes inside a BuildSceneLists job while water/shadow culls
-	// run on other threads, each on a different process object) -- a shared flag would
-	// leak main-pass testing into unrelated passes.
-	std::atomic<RE::NiCullingProcess*> g_activeCullProcess{ nullptr };
-
-	// BSCullingProcess::Process1 (NiCullingProcess vtable index 0x16): per-object
-	// processing / recursion driver. If the object is provably occluded during the
-	// main cull pass, skip the original call entirely so neither the object nor its
-	// subtree is accumulated.
-	// Mirror the ENGINE's own cull side effect when we skip an object: clear its
-	// kAccumulated flag exactly like BSCullingProcess does on a frustum cull (gated on
-	// recurseToGeometry + updateAccumulateFlag). Without this, downstream consumers can
-	// read a STALE accumulated bit from a previous frame on an object we occluded --
-	// i.e. MOC-culling must be a strict superset of vanilla culling's effects.
+	// Mirror the ENGINE's own cull side effect when we skip an object: clear its kAccumulated
+	// flag exactly like BSCullingProcess does on a frustum cull (gated on recurseToGeometry +
+	// updateAccumulateFlag). Without this, downstream consumers can read a STALE accumulated bit
+	// from a previous frame on an object we culled -- our culling has to be a strict superset of
+	// vanilla culling's effects, not just its verdicts.
 	inline void MarkCulledLikeEngine(RE::NiCullingProcess* a_self, RE::NiAVObject* a_object)
 	{
 		auto* bsp = static_cast<RE::BSCullingProcess*>(a_self);
@@ -43,53 +30,32 @@ namespace
 			a_object->GetFlags().reset(RE::NiAVObject::Flag::kAccumulated);
 	}
 
-	// CS_MOC_VALIDATE=1: measure the user's acceptance criterion directly -- of the
-	// objects the ENGINE culls (frustum + occlusion planes), what fraction would MOC
-	// also have culled? Detected via the kAccumulated flag across the original call
-	// (only meaningful when the process recurses + updates the flag).
-	bool                       g_validateMode = false;
-	std::atomic<std::uint64_t> g_engineCulled{ 0 };
-	std::atomic<std::uint64_t> g_engineCulledMocAgrees{ 0 };
-	std::atomic<std::uint64_t> g_enginePassed{ 0 };
-
+	// BSCullingProcess::Process1 (NiCullingProcess vtable index 0x16): the per-object processing
+	// and recursion driver. Skipping the original call drops the object and its whole subtree.
 	template <class HookT>
 	void Process1_Impl(RE::NiCullingProcess* a_self, RE::NiAVObject* a_object, std::int32_t a_arg2)
 	{
-		// Gate on the CAMERA, not the single-instance bracket marker: the main
-		// view runs MULTIPLE concurrent cull processes (scene-list jobs + the
-		// per-pass subtree walks), and only whichever instance held the marker
-		// got MOC-tested -- so whether a given walk culled an object depended on
-		// thread scheduling, and the depth walk could draw what the main walk
-		// culled. That per-walk disagreement flickered REGARDLESS of buffer
-		// correctness (the mechanism survived every buffer-side fix). The camera
-		// check makes testing uniform across every main-view walk while still
-		// excluding shadow/reflection/cubemap/first-person culls.
-		// Scene-list (accumulation) walks only: they run on JOB threads with the
-		// RENDER camera and decide the pass lists (= the draws). The frozen cull
-		// camera's per-pass subtree walks run on the RENDER THREAD interleaved
-		// with utility/lighting submission -- testing there billed MOC CPU to
-		// those overlay windows for little extra culling.
-		const bool bracketed = MOC::IsSceneListCamera(a_self->camera);
-		if (bracketed && a_object && !MOC::TestObject(a_object)) {
+		// Gate on the camera, not on a per-process marker. The main view runs several concurrent
+		// cull processes and only whichever held the marker would be tested, so a walk's verdict
+		// would depend on thread scheduling. The camera check covers every main-view walk while
+		// still excluding shadow, reflection, cubemap and first-person culls.
+		const bool isSceneList = HiZCull::IsSceneListCamera(a_self->camera);
+		if (isSceneList && a_object && !HiZCull::TestObject(a_object)) {
 			MarkCulledLikeEngine(a_self, a_object);
-			return;  // occluded -> do not accumulate / recurse
+			return;
 		}
 
-		// SUN SHADOW CASTER culling: the stage-1 caster pre-gather runs through
-		// this same body with the dir light's gather camera; a rejection here
-		// removes the caster from EVERY cascade (no cross-frame caching -- the
-		// lists rebuild each frame). Guards mirror the engine's testable subset
-		// (IDA 2026-07-11): zero-radius and kAlwaysDraw(0x800)/0x1000-shortcut
-		// objects are never tested, nor are actors (skinned-bounds lesson).
-		if (!bracketed && a_object && MOC::IsSunGatherCamera(a_self->camera)) {
+		// SUN SHADOW CASTER culling: the stage-1 caster pre-gather runs through this same body
+		// with the dir light's gather camera, so a rejection here removes the caster from EVERY
+		// cascade (the lists rebuild each frame, there is no cross-frame caching). The guards
+		// mirror the engine's own testable subset: zero-radius and kAlwaysDraw(0x800)/0x1000
+		// objects are never tested, nor are actors.
+		if (!isSceneList && a_object && HiZCull::IsSunGatherCamera(a_self->camera)) {
 			const auto fl = a_object->GetFlags().underlying();
 			if (a_object->worldBound.radius > 0.0f && !(fl & 0x800) && !(fl & 0x1000)) {
 				auto* ref = a_object->GetUserData();
 				if (!ref || ref->formType != RE::FormType::ActorCharacter) {
-					// Small-caster contribution cull (cheap size test, SSS-masked) +
-					// optional sun-view occlusion. Either dropping it removes the
-					// caster from every cascade.
-					if (!MOC::TestShadowCasterSmall(a_object) || !MOC::TestObjectSunView(a_object)) {
+					if (!HiZCull::TestShadowCasterSmall(a_object)) {
 						MarkCulledLikeEngine(a_self, a_object);
 						return;
 					}
@@ -97,23 +63,6 @@ namespace
 			}
 		}
 
-		if (g_validateMode && bracketed && a_object) {
-			auto* bsp = static_cast<RE::BSCullingProcess*>(a_self);
-			if (bsp->recurseToGeometry && a_self->updateAccumulateFlag) {
-				HookT::func(a_self, a_object, a_arg2);
-				const bool accumulated = a_object->GetFlags().any(RE::NiAVObject::Flag::kAccumulated);
-				if (!accumulated) {
-					g_engineCulled.fetch_add(1, std::memory_order_relaxed);
-					// Would MOC have culled it too? (Counts frustum-outs as agreement:
-					// TestRect returns VIEW_CULLED outside the frustum.)
-					if (!MOC::TestObject(a_object))
-						g_engineCulledMocAgrees.fetch_add(1, std::memory_order_relaxed);
-				} else {
-					g_enginePassed.fetch_add(1, std::memory_order_relaxed);
-				}
-				return;
-			}
-		}
 		HookT::func(a_self, a_object, a_arg2);
 	}
 
@@ -126,10 +75,9 @@ namespace
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	// Same hook for BSParabolicCullingProcess, which OVERRIDES Process1/Process2 with its
-	// own bodies. The main-scene subtree culls run on the global parabolic process --
-	// hooking only BSCullingProcess never sees them. Separate hook structs keep each
-	// body's original function pointer.
+	// Same hook for BSParabolicCullingProcess, which OVERRIDES Process1/Process2 with its own
+	// bodies. The main-scene subtree culls run on the global parabolic process, so hooking only
+	// BSCullingProcess never sees them. Separate structs keep each body's original pointer.
 	struct PProcess1_Hook
 	{
 		static void thunk(RE::NiCullingProcess* a_self, RE::NiAVObject* a_object, std::int32_t a_arg2)
@@ -139,71 +87,22 @@ namespace
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	// Shared Process2 (top-level cull entry, vtable index 0x17) logic: decide whether the
-	// nested Process1 calls of THIS cull should be occlusion-tested. BuildOccluders gates
-	// on pointer identity with the engine's main world-render camera and returns true only
-	// for main-scene culls with a freshly built (or reused same-frame) buffer. Synchronous
-	// in V1: the buffer is ready before the nested Process1 calls.
-	bool Process2_Begin(const RE::NiCamera* a_camera, RE::NiAVObject* a_scene)
+	// Process2 (vtable 0x17) is the top-level cull entry. Latch the camera for this pass.
+	template <class HookT>
+	void Process2_Impl(RE::NiCullingProcess* a_self, const RE::NiCamera* a_camera, RE::NiAVObject* a_scene, RE::NiVisibleArray* a_visibleSet)
 	{
 		auto* feature = OcclusionCulling::GetSingleton();
-
-		bool active = false;
-		if (feature->IsActive() && MOC::IsInitialized() && a_camera) {
-			if (MOC::BuildOccluders(const_cast<RE::NiCamera*>(a_camera)))
-				active = MOC::EnableOcclusionTesting;
-		}
-		if (g_validateMode && active) {
-			if (auto* gs = RE::BSGraphics::State::GetSingleton(); gs && (gs->frameCount % 120u) == 0u) {
-				logger::info("[MOC][validate] engineCulled={} mocAgrees={} ({:.1f}%) enginePassed={}",
-					g_engineCulled.load(), g_engineCulledMocAgrees.load(),
-					g_engineCulled.load() ? 100.0 * g_engineCulledMocAgrees.load() / g_engineCulled.load() : 0.0,
-					g_enginePassed.load());
-			}
-		}
-		(void)a_scene;
-		return active;
-	}
-
-	// Mark a_self as the active main-cull process for the duration of the original call
-	// (only when this cull is the main camera's). Non-main culls don't touch the marker,
-	// so concurrent auxiliary passes can neither enable themselves nor disable a running
-	// main cull. Restores the previous marker (not nullptr) because both Process2 bodies
-	// are detoured and the parabolic override may chain into the base implementation --
-	// a nested bracket must not strip the outer one.
-	template <class HookT>
-	void Process2_Bracketed(RE::NiCullingProcess* a_self, const RE::NiCamera* a_camera, RE::NiAVObject* a_scene, RE::NiVisibleArray* a_visibleSet)
-	{
-		const bool active = Process2_Begin(a_camera, a_scene);
-		RE::NiCullingProcess* const prev = g_activeCullProcess.load(std::memory_order_relaxed);
-		if (active)
-			g_activeCullProcess.store(a_self, std::memory_order_relaxed);
-
-		// MOC-EXCLUSIVE: neutralize the vanilla occlusion planes for this main cull by
-		// zeroing the compound frustum's operator count (the engine's Process1 gate is
-		// `compoundFrustum && freeOp && ...`). View-frustum culling is unaffected (the
-		// plain m_kPlanes path still runs); MOC provides all occlusion. Restored after
-		// the pass; auxiliary passes (their own process objects) never see this.
-		auto*         cf = active && MOC::ExclusiveOcclusion ? static_cast<RE::BSCullingProcess*>(a_self)->compoundFrustum : nullptr;
-		std::uint32_t savedOps = 0;
-		if (cf) {
-			savedOps = cf->freeOp;
-			cf->freeOp = 0;
-		}
+		if (feature->IsActive())
+			HiZCull::BeginCull(a_camera);
 
 		HookT::func(a_self, a_camera, a_scene, a_visibleSet);
-
-		if (cf)
-			cf->freeOp = savedOps;
-		if (active)
-			g_activeCullProcess.store(prev, std::memory_order_relaxed);
 	}
 
 	struct Process2_Hook
 	{
 		static void thunk(RE::NiCullingProcess* a_self, const RE::NiCamera* a_camera, RE::NiAVObject* a_scene, RE::NiVisibleArray* a_visibleSet)
 		{
-			Process2_Bracketed<Process2_Hook>(a_self, a_camera, a_scene, a_visibleSet);
+			Process2_Impl<Process2_Hook>(a_self, a_camera, a_scene, a_visibleSet);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -212,25 +111,31 @@ namespace
 	{
 		static void thunk(RE::NiCullingProcess* a_self, const RE::NiCamera* a_camera, RE::NiAVObject* a_scene, RE::NiVisibleArray* a_visibleSet)
 		{
-			Process2_Bracketed<PProcess2_Hook>(a_self, a_camera, a_scene, a_visibleSet);
+			Process2_Impl<PProcess2_Hook>(a_self, a_camera, a_scene, a_visibleSet);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	// TestBaseVisibility1(BSMultiBound&) -- the engine's CONTAINER visibility path (rooms,
-	// cells, building shells). Multibound nodes never reach Process1, so this is where the
-	// high-value tight-AABB occlusion tests belong: one occluded container prunes all its
-	// contents. Engine verdict first; we only downgrade visible -> occluded.
+	// TestBaseVisibility1(BSMultiBound&) -- the engine's CONTAINER visibility path (rooms, cells,
+	// building shells). Multibound nodes never reach Process1, so this is where the high-value
+	// tests belong: one occluded container prunes everything inside it. Engine verdict first; we
+	// only ever downgrade visible -> occluded.
+	template <class HookT>
+	bool TestBaseVis1_Impl(RE::BSCullingProcess* a_self, RE::BSMultiBound* a_bound)
+	{
+		const bool visible = HookT::func(a_self, a_bound);
+		if (visible && a_bound &&
+			HiZCull::IsSceneListCamera(static_cast<RE::NiCullingProcess*>(a_self)->camera) &&
+			!HiZCull::TestMultiBound(a_bound))
+			return false;
+		return visible;
+	}
+
 	struct TestBaseVis1_Hook
 	{
 		static bool thunk(RE::BSCullingProcess* a_self, RE::BSMultiBound* a_bound)
 		{
-			const bool visible = func(a_self, a_bound);
-			if (visible && a_bound &&
-				MOC::IsSceneListCamera(static_cast<RE::NiCullingProcess*>(a_self)->camera) &&
-				!MOC::TestMultiBound(a_bound))
-				return false;
-			return visible;
+			return TestBaseVis1_Impl<TestBaseVis1_Hook>(a_self, a_bound);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -239,69 +144,36 @@ namespace
 	{
 		static bool thunk(RE::BSCullingProcess* a_self, RE::BSMultiBound* a_bound)
 		{
-			const bool visible = func(a_self, a_bound);
-			if (visible && a_bound &&
-				MOC::IsSceneListCamera(static_cast<RE::NiCullingProcess*>(a_self)->camera) &&
-				!MOC::TestMultiBound(a_bound))
-				return false;
-			return visible;
+			return TestBaseVis1_Impl<PTestBaseVis1_Hook>(a_self, a_bound);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	// Distant-tree LOD culling seam. BSMultiStreamInstanceTriShape carries a DUMMY
-	// worldBound (radius 1.0) + kAlwaysDraw, so object-level tests never see it; its
-	// real culling is per-instance-group inside OnVisible: the engine frustum-tests
-	// each <=75-tree group's world AABB and writes a visible byte at group+0x50. This
-	// post-hook ANDs a MOC occlusion verdict into groups the engine kept. Stateless
-	// (the byte is rewritten by every walk), downgrade-only, and gated to the
-	// bracketed main cull so shadow/reflection walks keep vanilla verdicts. Grass
-	// shares this class -- distant-tree shapes are selected by their shader property
-	// (BSDistantTreeShaderProperty), grass is deliberately left untouched. Unlike
-	// Process1 this IS genuine virtual dispatch (called via vtable from the cull
-	// walk), so a vtable patch sees every call.
+	// Distant-tree LOD seam. BSMultiStreamInstanceTriShape carries a dummy worldBound plus
+	// kAlwaysDraw, so object-level tests never see it; the real culling is per instance group
+	// inside OnVisible. This post-hook ANDs an occlusion verdict into groups the engine kept --
+	// stateless, since the flag is rewritten by every walk, and downgrade-only. Grass shares this
+	// class, so distant trees are selected by shader property and grass is left alone.
 	struct MSITS_OnVisible_Hook
 	{
 		static void thunk(RE::BSMultiStreamInstanceTriShape* a_this, RE::NiCullingProcess* a_process, std::int32_t a_alphaGroupIndex)
 		{
 			func(a_this, a_process, a_alphaGroupIndex);
-			// Gate on the CAMERA, not the process-instance marker: the LODRoot subtree
-			// (where LOD-tree shapes hang) is walked by concurrent scene-list job
-			// processes, and the single-instance g_activeCullProcess marker only ever
-			// matches one of them (measured: ~7 of ~340 visible groups/frame tested).
-			// The dual-camera identity check is the same gate BuildOccluders uses, so
-			// shadow/reflection/cubemap/first-person walks stay untouched.
-			if (!a_process || !MOC::IsMainViewCamera(a_process->camera))
+
+			if (!a_process || !HiZCull::IsSceneListCamera(a_process->camera))
 				return;
-			if (!MOC::CullTreeLODGroups)
+			if (!HiZCull::CullTreeLODGroups)
 				return;
 			auto* prop = a_this->GetGeometryRuntimeData().shaderProperty.get();
 			if (!prop || !netimmerse_cast<RE::BSDistantTreeShaderProperty*>(prop))
 				return;
-			// InstanceGroup derives from BSMultiBoundAABB, so it is its own bound; the SE
-			// port poked the visible flag through a raw +0x50 offset, which the typed
-			// member replaces.
+			// InstanceGroup derives from BSMultiBoundAABB, so it is its own bound.
 			for (auto* group : a_this->GetMultiStreamTrishapeRuntimeData().instanceGroups) {
 				if (!group || !group->isVisible)
 					continue;
-				if (!MOC::TestInstanceGroup(group))
+				if (!HiZCull::TestInstanceGroup(group))
 					group->isVisible = false;
 			}
-		}
-		static inline REL::Relocation<decltype(thunk)> func;
-	};
-
-	// Main::DrawWorld_PreRender: the render camera's frustum is final at entry (its first act
-	// is seeding the cull processes with it), and the first cull jobs are queued only after
-	// Main::Begin and the water effects. Kicking the occluder raster here gives it that whole
-	// window, so the raster-before-test model costs almost no test-side waiting. Redundant
-	// with the cull-time claim -- one CAS per frame, whichever runs first wins.
-	struct DrawWorldPreRender_Hook
-	{
-		static std::int64_t thunk(void* a_main, std::int64_t a_arg2, char a_isMainMenu)
-		{
-			MOC::KickBuild();
-			return func(a_main, a_arg2, a_isMainMenu);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -309,101 +181,30 @@ namespace
 
 void OcclusionCulling::PostPostLoad()
 {
-	// Idempotent: this runs from XSEPlugin's direct call AND (once we set loaded=true)
-	// from Feature::ForEachLoadedFeature, so guard against double vtable-hook install.
+	// Idempotent: this runs from XSEPlugin's direct call AND (once loaded is true) from
+	// Feature::ForEachLoadedFeature, so guard against a double vtable-hook install.
 	static bool s_installed = false;
 	if (s_installed)
 		return;
 
-	// CS_OCCLUSION=1 just flips the master toggle ON at boot; the menu checkbox
-	// (settings.EnableOcclusionTesting) is the real gate and works without the env var.
+	// CS_OCCLUSION=1 flips the master toggle on at boot for automated runs.
 	char buf[16] = {};
-	if (GetEnvironmentVariableA("CS_OCCLUSION", buf, sizeof(buf)) && buf[0] == '1') {
-		envEnabled = true;
+	if (GetEnvironmentVariableA("CS_OCCLUSION", buf, sizeof(buf)) && buf[0] == '1')
 		settings.EnableOcclusionTesting = true;
-	}
-	// CS_MOC_MAX_OCCLUDERS=<n>: boot-time raster-budget override for automated A/B runs.
-	if (GetEnvironmentVariableA("CS_MOC_MAX_OCCLUDERS", buf, sizeof(buf)) && buf[0]) {
-		const int v = atoi(buf);
-		if (v > 0)
-			settings.MaxOccludersPerFrame = v;
-	}
-	// CS_MOC_NO_SIMPLIFY=1: disable occluder mesh simplification (A/B of cull-rate impact).
-	if (GetEnvironmentVariableA("CS_MOC_NO_SIMPLIFY", buf, sizeof(buf)) && buf[0] == '1')
-		settings.SimplifyOccluders = false;
-	// CS_MOC_THREADS=<n>: raster worker count override (1..16) for A/B runs.
-	if (GetEnvironmentVariableA("CS_MOC_THREADS", buf, sizeof(buf)) && buf[0]) {
-		const int v = atoi(buf);
-		if (v >= 1 && v <= 16)
-			settings.RasterThreads = v;
-	}
-	// CS_MOC_FORCE_CULL=<pct>: DIAGNOSTIC -- force-cull a percentage of kept objects to
-	// measure the fps-per-culled-object curve. Breaks the image; env-only, never persisted.
-	if (GetEnvironmentVariableA("CS_MOC_FORCE_CULL", buf, sizeof(buf)) && buf[0]) {
-		const int v = atoi(buf);
-		if (v >= 0 && v <= 100)
-			diagForceCullPercent = v;
-	}
-	// CS_MOC_EXCLUSIVE=1: MOC-exclusive occlusion (vanilla planes neutralized).
-	if (GetEnvironmentVariableA("CS_MOC_EXCLUSIVE", buf, sizeof(buf)) && buf[0] == '1')
-		settings.ExclusiveOcclusion = true;
-	// CS_MOC_TREE_LOD=0/1: distant-tree LOD group culling override for A/B runs.
-	if (GetEnvironmentVariableA("CS_MOC_TREE_LOD", buf, sizeof(buf)) && buf[0])
-		settings.CullTreeLOD = buf[0] == '1';
-	// CS_MOC_TREE_OCCLUDERS=0/1: opaque tree parts as occluders, override for A/B runs.
-	if (GetEnvironmentVariableA("CS_MOC_TREE_OCCLUDERS", buf, sizeof(buf)) && buf[0])
-		settings.TreeOccluders = buf[0] == '1';
-	// CS_MOC_SUN=0/1: sun-view shadow-caster culling override for A/B runs.
-	if (GetEnvironmentVariableA("CS_MOC_SUN", buf, sizeof(buf)) && buf[0])
-		settings.CullSunShadows = buf[0] == '1';
-	// CS_MOC_SHADOW_SMALL=0/1: distance-scaled small shadow-caster culling.
-	if (GetEnvironmentVariableA("CS_MOC_SHADOW_SMALL", buf, sizeof(buf)) && buf[0])
-		settings.CullSmallShadows = buf[0] == '1';
-	if (GetEnvironmentVariableA("CS_MOC_SHADOW_NEAR", buf, sizeof(buf)) && buf[0])
-		settings.ShadowCullNearRadius = static_cast<float>(atof(buf));
-	if (GetEnvironmentVariableA("CS_MOC_SHADOW_SLOPE", buf, sizeof(buf)) && buf[0])
-		settings.ShadowCullDistSlope = static_cast<float>(atof(buf));
-	// CS_MOC_ALPHA_OCCLUDERS=0/1: alpha-TESTED geometry as solid occluders (A/B).
-	if (GetEnvironmentVariableA("CS_MOC_ALPHA_OCCLUDERS", buf, sizeof(buf)) && buf[0])
-		settings.AlphaTestedOccluders = buf[0] == '1';
-	// CS_MOC_VALIDATE=1: engine-cull agreement instrumentation (see Process1_Impl).
-	if (GetEnvironmentVariableA("CS_MOC_VALIDATE", buf, sizeof(buf)) && buf[0] == '1')
-		g_validateMode = true;
-	// CS_MOC_MIN_TEST_RADIUS=<n>: per-object test gate override for A/B runs.
-	if (GetEnvironmentVariableA("CS_MOC_MIN_TEST_RADIUS", buf, sizeof(buf)) && buf[0]) {
-		const int v = atoi(buf);
-		if (v >= 0)
-			settings.OccluderTestMinRadius = static_cast<float>(v);
+
+	// CS_OCCLUSION_NO_HOOKS=1: install nothing, for a baseline without even trampoline overhead.
+	if (GetEnvironmentVariableA("CS_OCCLUSION_NO_HOOKS", buf, sizeof(buf)) && buf[0] == '1') {
+		logger::warn("[OcclusionCulling] CS_OCCLUSION_NO_HOOKS=1: no hooks installed");
+		return;
 	}
 
-	// Sync BEFORE Init so boot-time settings (env overrides, defaults) reach the pool
-	// creation (RasterThreads is consumed inside MOC::Init).
-	SyncSettingsToMOC();
-	MOC::Init();
-
-	// CS_MOC_NO_HOOKS=1: TRUE-VANILLA baseline for benchmarks -- skip every
-	// detour, vtable patch and the MOC builder entirely; the game runs with
-	// zero occlusion-culling instrumentation (not even trampoline overhead).
-	{
-		char nhBuf[8] = {};
-		if (GetEnvironmentVariableA("CS_MOC_NO_HOOKS", nhBuf, sizeof(nhBuf)) && nhBuf[0] == '1') {
-			logger::warn("[OcclusionCulling] CS_MOC_NO_HOOKS=1: no hooks installed (pure vanilla baseline)");
-			return;
-		}
-	}
-
-	// Detour the Process1/Process2 FUNCTION BODIES of both culling-process classes (base
-	// BSCullingProcess and the BSParabolicCullingProcess overrides the main world cull runs
-	// on). Body detours are essential: the engine's main cull walk calls Process1 DIRECTLY
-	// (devirtualized), so vtable patches never see it -- with vtable hooks the buffer built
-	// correctly but tested stayed 0. This mirrors Nukem, who detoured the Process function
-	// body (1.5.23 0xD50310).
+	// Detour the function BODIES of both culling-process classes. Body detours are essential:
+	// the main cull walk calls Process1 devirtualized, so a vtable patch never sees it.
 	//
-	// The bodies are reached through the class vtables rather than through address-library
-	// ids for the bodies themselves: the ids the SE line used have no AE counterpart here,
-	// while VTABLE_BSCullingProcess and VTABLE_BSParabolicCullingProcess are variant ids that
-	// resolve on every runtime. Installed unconditionally; runtime behavior is gated by
-	// IsActive() inside the thunks.
+	// The bodies are reached through the class vtables rather than through address-library ids
+	// for the bodies themselves: the ids the SE line used have no AE counterpart, while
+	// VTABLE_BSCullingProcess and VTABLE_BSParabolicCullingProcess are variant ids that resolve
+	// on every runtime. Installed unconditionally; behaviour is gated inside the thunks.
 	constexpr std::size_t kProcess1 = 0x16;
 	constexpr std::size_t kProcess2 = 0x17;
 	constexpr std::size_t kTestBaseVisibility1 = 0x1A;
@@ -412,245 +213,197 @@ void OcclusionCulling::PostPostLoad()
 	const auto p2b = stl::detour_vtable_body<kProcess2, Process2_Hook>(RE::VTABLE_BSCullingProcess[0]);
 	const auto tb1 = stl::detour_vtable_body<kTestBaseVisibility1, TestBaseVis1_Hook>(RE::VTABLE_BSCullingProcess[0]);
 
-	// The parabolic process overrides all three, so its slots are distinct bodies. Guard
-	// anyway: detouring one address twice would chain the hook onto itself.
+	// The parabolic process overrides all three, so its slots are distinct bodies. Guard anyway:
+	// detouring one address twice would chain the hook onto itself.
 	const auto paraVtable = reinterpret_cast<std::uintptr_t*>(
 		REL::Relocation<std::uintptr_t>(RE::VTABLE_BSParabolicCullingProcess[0]).address());
 
-	std::uintptr_t p1p = 0;
-	std::uintptr_t p2p = 0;
-
 	if (paraVtable[kProcess1] != p1b)
-		p1p = stl::detour_vtable_body<kProcess1, PProcess1_Hook>(RE::VTABLE_BSParabolicCullingProcess[0]);
+		stl::detour_vtable_body<kProcess1, PProcess1_Hook>(RE::VTABLE_BSParabolicCullingProcess[0]);
 	if (paraVtable[kProcess2] != p2b)
-		p2p = stl::detour_vtable_body<kProcess2, PProcess2_Hook>(RE::VTABLE_BSParabolicCullingProcess[0]);
+		stl::detour_vtable_body<kProcess2, PProcess2_Hook>(RE::VTABLE_BSParabolicCullingProcess[0]);
 	if (paraVtable[kTestBaseVisibility1] != tb1)
 		stl::detour_vtable_body<kTestBaseVisibility1, PTestBaseVis1_Hook>(RE::VTABLE_BSParabolicCullingProcess[0]);
 
-	stl::write_vfunc<0x34, MSITS_OnVisible_Hook>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);  // distant-tree LOD group culling
+	stl::write_vfunc<0x34, MSITS_OnVisible_Hook>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 
-	// Frame-start raster kick. The AE id comes from chaining the address-library databases
-	// (SE 35560 -> 1.5.97 0x1405B1860 -> 1.6.318 0x1405D8560 -> AE 36559); the same chain
-	// reproduces CommonLibSSE-NG's own 517006/403513 pair for Main::WorldRootNode, which is
-	// what makes it trustworthy.
-	stl::detour_thunk<DrawWorldPreRender_Hook>(REL::RelocationID(35560, 36559));
-
-	logger::info("[OcclusionCulling] detours attached: P1base={} P2base={} P1para={} P2para={}",
-		p1b != 0, p2b != 0, p1p != 0, p2p != 0);
-
-	// Quiesce the builder on loading-screen open (scene teardown race).
-	if (auto* ui = RE::UI::GetSingleton()) {
-		static MenuEventSink s_menuSink;
-		ui->AddEventSink<RE::MenuOpenCloseEvent>(&s_menuSink);
-	}
-
+	SyncSettings();
 	s_installed = true;
-	// Mark loaded (+ a nominal version) so the feature appears as a normal entry in the
-	// CS menu; it has no shader .ini so Feature::Load leaves it unloaded otherwise. The
-	// disk-cache overrides above keep this safe.
+
+	// Mark loaded (+ a nominal version) so the feature appears as a normal entry in the CS menu:
+	// it has no shader .ini, so Feature::Load leaves it unloaded otherwise, and IsActive() would
+	// be false forever. The disk-cache overrides in the header keep that safe.
 	version = "1-0-0";
 	loaded = true;
 
-	logger::info("[OcclusionCulling] hooks installed (master={})", settings.EnableOcclusionTesting ? "on" : "off");
+	logger::info("[OcclusionCulling] hooks installed (testing={})", settings.EnableOcclusionTesting);
 }
 
 bool OcclusionCulling::IsActive() const
 {
-	// Menu-driven master gate (also flipped on at boot by CS_OCCLUSION=1).
-	return settings.EnableOcclusionTesting;
+	return loaded && settings.EnableOcclusionTesting;
 }
 
-void OcclusionCulling::SyncSettingsToMOC()
+void OcclusionCulling::SyncSettings()
 {
-	MOC::EnableOcclusionTesting = settings.EnableOcclusionTesting;
-	MOC::EnableOccluderRendering = settings.EnableOccluderRendering;
-	MOC::OccluderMaxDistance = settings.OccluderMaxDistance;
-	MOC::OccluderFirstLevelMinSize = settings.OccluderFirstLevelMinSize;
-	// Clamp the EFFECTIVE budget: persisted settings from older sessions carry
-	// 4096 and silently override the tuned default (measured: 1463 occluders ->
-	// raster 6.5ms vs 384 -> 1.9ms). The slider can still lower it.
-	MOC::MaxOccludersPerFrame = static_cast<std::uint32_t>(std::clamp(settings.MaxOccludersPerFrame, 1, 512));
-	MOC::RasterThreads = settings.RasterThreads;      // applied at boot (pool created once)
-	MOC::SimplifyOccluders = settings.SimplifyOccluders;  // affects newly cached meshes
-	MOC::OccluderTestMinRadius = settings.OccluderTestMinRadius;
-	MOC::ExclusiveOcclusion = settings.ExclusiveOcclusion;
-	MOC::OccluderMinLeafSize = settings.OccluderMinLeafSize;
-	MOC::CullTreeLODGroups = settings.CullTreeLOD;
-	MOC::TreeOccluders = settings.TreeOccluders;
-	MOC::AlphaTestedOccluders = settings.AlphaTestedOccluders;
-	MOC::CullSunShadows = settings.CullSunShadows;
-	MOC::CullSmallShadows = settings.CullSmallShadows;
-	MOC::ShadowCullNearRadius = settings.ShadowCullNearRadius;
-	MOC::ShadowCullDistSlope = settings.ShadowCullDistSlope;
-	MOC::DiagForceCullPercent = diagForceCullPercent;  // env-only diagnostic, not persisted
-}
+	HiZCull::EnableOcclusionTesting = settings.EnableOcclusionTesting;
+	HiZCull::HiZOcclusionBias = settings.HiZOcclusionBias;
+	HiZCull::HiZMaxCameraMotion = settings.HiZMaxCameraMotion;
+	HiZCull::ObjectTestMinRadius = settings.ObjectTestMinRadius;
+	HiZCull::CullTreeLODGroups = settings.CullTreeLOD;
+	HiZCull::HideFrames = std::max(1u, settings.HideFrames);
 
-RE::BSEventNotifyControl OcclusionCulling::MenuEventSink::ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
-{
-	// A loading screen opening means a scene teardown is imminent; a builder gather in
-	// flight would race freed nodes (crashed on worldspace transitions twice). Drain it
-	// BEFORE the teardown starts. The claim-path guard then refuses new kicks until the
-	// load finishes.
-	if (a_event && a_event->opening && a_event->menuName == RE::LoadingMenu::MENU_NAME)
-		MOC::QuiesceBuilder();
-	return RE::BSEventNotifyControl::kContinue;
-}
+	HiZCull::CullSmallObjects = settings.CullSmallObjects;
+	HiZCull::ObjectCullNearRadius = settings.ObjectCullNearRadius;
+	HiZCull::ObjectCullDistSlope = settings.ObjectCullDistSlope;
 
-void OcclusionCulling::Prepass()
-{
-	MOC::DumpDebugImages();  // env-gated (CS_MOC_DUMP=1) + rate-limited; no-op otherwise
+	HiZCull::CullSmallShadows = settings.CullSmallShadows;
+	HiZCull::ShadowCullNearRadius = settings.ShadowCullNearRadius;
+	HiZCull::ShadowCullDistSlope = settings.ShadowCullDistSlope;
 }
 
 void OcclusionCulling::DrawSettings()
 {
-	ImGui::TextWrapped("%s", T("feature.occlusion_culling.desc",
-		"Software (CPU) occlusion culling: skips drawing scene objects fully hidden behind large static meshes. Experimental."));
-	ImGui::Separator();
+	ImGui::TextWrapped("%s", T(TKEY("about"),
+		"Skips drawing objects the camera cannot see, by testing them against the depth buffer "
+		"the GPU already produced this frame. Removing a draw is worth more under DXVK than on "
+		"the native driver, because DXVK pays more CPU per draw."));
+	ImGui::Spacing();
 
 	bool changed = false;
+	changed |= ImGui::Checkbox(T(TKEY("enabled"), "Enable Occlusion Culling"), &settings.EnableOcclusionTesting);
 
-	// Master on/off — this is the "toggle culling entirely" switch.
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.enable_testing", "Enable Occlusion Culling"), &settings.EnableOcclusionTesting);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.enable_testing_tooltip",
-			"Master toggle. When on, large static occluders are rasterized each frame and objects hidden behind them are skipped."));
+	if (ImGui::CollapsingHeader(T(TKEY("occlusion"), "Occlusion"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		changed |= ImGui::SliderFloat(T(TKEY("bias"), "Depth Bias"), &settings.HiZOcclusionBias, 0.0f, 0.005f, "%.5f");
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("bias_tooltip"),
+				"Tolerance on the depth comparison. Larger values cull less. Raise it if objects "
+				"flicker at the edges of walls."));
+		}
 
-	ImGui::BeginDisabled(!settings.EnableOcclusionTesting);
+		changed |= ImGui::SliderFloat(T(TKEY("max_motion"), "Max Camera Motion"), &settings.HiZMaxCameraMotion, 0.0f, 4096.0f, "%.0f");
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("max_motion_tooltip"),
+				"The depth buffer reaches the CPU a few frames late, so it describes a slightly "
+				"older camera. Once the camera has travelled further than this since that "
+				"capture, the buffer is ignored rather than trusted. Lower is safer."));
+		}
 
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.enable_rendering", "Render Occluders"), &settings.EnableOccluderRendering);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.enable_rendering_tooltip",
-			"Rasterize large static meshes into the CPU occlusion buffer each frame. Turn OFF to A/B the cost: the buffer stays empty so nothing is culled, but the traversal still runs."));
+		changed |= ImGui::SliderFloat(T(TKEY("test_min_radius"), "Minimum Test Size"), &settings.ObjectTestMinRadius, 0.0f, 512.0f, "%.0f");
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("test_min_radius_tooltip"),
+				"Objects smaller than this are drawn without being tested. A tiny object costs "
+				"little to draw, so testing it is rarely worth the time."));
+		}
 
-	changed |= ImGui::SliderFloat(T("feature.occlusion_culling.max_distance", "Occluder Max Distance"), &settings.OccluderMaxDistance, 1000.0f, 100000.0f, "%.0f");
-	changed |= ImGui::SliderFloat(T("feature.occlusion_culling.first_level_min_size", "Occluder Min Size"), &settings.OccluderFirstLevelMinSize, 0.0f, 2000.0f, "%.0f");
+		changed |= ImGui::Checkbox(T(TKEY("cull_tree_lod"), "Cull Distant Tree LOD"), &settings.CullTreeLOD);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("cull_tree_lod_tooltip"),
+				"Tests distant-tree LOD groups as well. Usually costs more than it saves in the open, "
+				"where the groups are large and rarely fully hidden; worth enabling in dense forest."));
+		}
 
-	changed |= ImGui::SliderFloat(T("feature.occlusion_culling.min_leaf_size", "Min Occluder Mesh Size"), &settings.OccluderMinLeafSize, 0.0f, 500.0f, "%.0f");
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.min_leaf_size_tooltip",
-			"Meshes smaller than this are not rasterized into the occlusion buffer. Everything larger is rendered (no per-frame cap)."));
-
-	changed |= ImGui::SliderInt(T("feature.occlusion_culling.max_occluders", "Max Occluders / Frame"), &settings.MaxOccludersPerFrame, 16, 4096, "%d", ImGuiSliderFlags_Logarithmic);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.max_occluders_tooltip",
-			"CPU raster budget per frame, selected by estimated screen coverage (large occluders like terrain always make the cut). Typical scenes offer 700-1600 candidates, so high values mean 'rasterize everything'."));
-
-	changed |= ImGui::SliderInt(T("feature.occlusion_culling.raster_threads", "Raster Threads"), &settings.RasterThreads, 1, 16);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.raster_threads_tooltip",
-			"Worker threads for occluder rasterization (Intel CullingThreadpool). Applied at next game start."));
-
-	changed |= ImGui::SliderFloat(T("feature.occlusion_culling.min_test_radius", "Min Tested Object Size"), &settings.OccluderTestMinRadius, 0.0f, 200.0f, "%.0f");
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.min_test_radius_tooltip",
-			"Objects smaller than this (world-bound radius) are never occlusion-tested. Lower = more draw calls saved but more CPU per frame."));
-
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.exclusive", "Exclusive Occlusion (replace vanilla planes)"), &settings.ExclusiveOcclusion);
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.tree_lod", "Cull Distant Tree LOD"), &settings.CullTreeLOD);
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.tree_occluders", "Opaque Tree Parts as Occluders"), &settings.TreeOccluders);
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.alpha_occluders", "Alpha-Tested Objects as Occluders"), &settings.AlphaTestedOccluders);
-
-	ImGui::Spacing();
-	ImGui::TextDisabled("%s", T("feature.occlusion_culling.shadow_header", "Shadow Casters"));
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.small_shadows", "Cull Small Shadow Casters"), &settings.CullSmallShadows);
-	if (auto* t = T("feature.occlusion_culling.small_shadows_tooltip", "Drops distant small objects from sun shadow maps (screen-space shadows cover the near field). Threshold grows with distance."); ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", t);
-	if (settings.CullSmallShadows) {
-		changed |= ImGui::SliderFloat(T("feature.occlusion_culling.shadow_near", "Shadow Cull Base Size"), &settings.ShadowCullNearRadius, 0.0f, 128.0f, "%.0f");
-		changed |= ImGui::SliderFloat(T("feature.occlusion_culling.shadow_slope", "Shadow Cull Distance Growth"), &settings.ShadowCullDistSlope, 0.0f, 0.08f, "%.3f");
-	}
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.sun_occlusion", "Sun-View Shadow Occlusion (experimental)"), &settings.CullSunShadows);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.exclusive_tooltip",
-			"Neutralize the vanilla occlusion planes during the main cull so MOC is the only occlusion mechanism. Experimental; view-frustum culling is unaffected."));
-
-	changed |= ImGui::Checkbox(T("feature.occlusion_culling.simplify", "Simplify Occluder Meshes"), &settings.SimplifyOccluders);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("%s", T("feature.occlusion_culling.simplify_tooltip",
-			"Reduce occluder meshes to ~half the triangles at cache time (meshoptimizer). Big raster speedup; affects newly loaded meshes."));
-
-	ImGui::EndDisabled();
-
-	if (changed)
-		SyncSettingsToMOC();
-
-	// Debug: the software occlusion depth buffer (occluder silhouettes, near = bright).
-	if (ImGui::CollapsingHeader(T("feature.occlusion_culling.debug_buffer", "Occlusion Depth Buffer"))) {
-		MOC::UpdateDebugView();
-		if (void* srv = MOC::GetDebugSRV()) {
-			const float w = ImGui::GetContentRegionAvail().x;
-			ImGui::Image(srv, ImVec2(w, w * (9.0f / 16.0f)));  // buffer is 16:9 (512x288)
-			ImGui::TextWrapped("%s", T("feature.occlusion_culling.debug_buffer_hint",
-				"Grayscale = rasterized static occluders (brighter = closer). Empty until CS_OCCLUSION=1 and occluders are rendered."));
-		} else {
-			ImGui::TextWrapped("%s", T("feature.occlusion_culling.debug_buffer_unavailable", "Depth buffer texture not available."));
+		int hideFrames = int(settings.HideFrames);
+		if (ImGui::SliderInt(T(TKEY("hide_frames"), "Frames Before Hiding"), &hideFrames, 1, 8)) {
+			settings.HideFrames = std::uint32_t(hideFrames);
+			changed = true;
+		}
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("hide_frames_tooltip"),
+				"How many frames in a row an object must test as hidden before it stops being "
+				"drawn. 1 reacts fastest and can make distant detail flicker; higher is steadier."));
 		}
 	}
+
+	if (ImGui::CollapsingHeader(T(TKEY("small_objects"), "Small Objects"))) {
+		ImGui::TextWrapped("%s", T(TKEY("small_objects_about"),
+			"Drops objects that cover almost none of the screen. Unlike occlusion culling this is "
+			"a quality trade, not a lossless one: the threshold grows with distance, so distant "
+			"clutter disappears while nearby objects never do."));
+		changed |= ImGui::Checkbox(T(TKEY("cull_small_objects"), "Cull Small Objects"), &settings.CullSmallObjects);
+		changed |= ImGui::SliderFloat(T(TKEY("object_near_radius"), "Near Size"), &settings.ObjectCullNearRadius, 0.0f, 64.0f, "%.1f");
+		changed |= ImGui::SliderFloat(T(TKEY("object_slope"), "Size Growth"), &settings.ObjectCullDistSlope, 0.0f, 0.05f, "%.4f");
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("object_slope_tooltip"),
+				"An object is dropped when its radius is below Near Size + Size Growth x distance."));
+		}
+	}
+
+	if (ImGui::CollapsingHeader(T(TKEY("small_shadows"), "Small Shadow Casters"))) {
+		ImGui::TextWrapped("%s", T(TKEY("small_shadows_about"),
+			"The same rule applied to shadows. Dropping a caster removes it from every cascade, "
+			"and screen-space shadows regenerate the near-field contact shadows those small "
+			"casters would have contributed."));
+		changed |= ImGui::Checkbox(T(TKEY("cull_small_shadows"), "Cull Small Shadow Casters"), &settings.CullSmallShadows);
+		changed |= ImGui::SliderFloat(T(TKEY("shadow_near_radius"), "Near Size"), &settings.ShadowCullNearRadius, 0.0f, 128.0f, "%.1f");
+		changed |= ImGui::SliderFloat(T(TKEY("shadow_slope"), "Size Growth"), &settings.ShadowCullDistSlope, 0.0f, 0.05f, "%.4f");
+	}
+
+	if (ImGui::CollapsingHeader(T(TKEY("statistics"), "Statistics"))) {
+		const auto stats = HiZCull::GetStats();
+		ImGui::Text("%s: %u", T(TKEY("stat_tested"), "Tested"), stats.tested);
+		ImGui::Text("%s: %u", T(TKEY("stat_culled"), "Culled"), stats.culled);
+		ImGui::Text("%s: %u", T(TKEY("stat_small_objects"), "Small objects dropped"), stats.smallObjects);
+		ImGui::Text("%s: %u", T(TKEY("stat_small_shadows"), "Small shadow casters dropped"), stats.smallShadows);
+		ImGui::Text("%s: %u", T(TKEY("stat_age"), "Depth buffer age (frames)"), stats.snapshotAge);
+	}
+
+	if (changed)
+		SyncSettings();
 }
 
 void OcclusionCulling::LoadSettings(json& o_json)
 {
-	if (o_json["EnableOcclusionTesting"].is_boolean())
-		settings.EnableOcclusionTesting = o_json["EnableOcclusionTesting"];
-	if (o_json["EnableOccluderRendering"].is_boolean())
-		settings.EnableOccluderRendering = o_json["EnableOccluderRendering"];
-	if (o_json["OccluderMaxDistance"].is_number())
-		settings.OccluderMaxDistance = o_json["OccluderMaxDistance"];
-	if (o_json["OccluderFirstLevelMinSize"].is_number())
-		settings.OccluderFirstLevelMinSize = o_json["OccluderFirstLevelMinSize"];
-	if (o_json["MaxOccludersPerFrame"].is_number_integer())
-		settings.MaxOccludersPerFrame = o_json["MaxOccludersPerFrame"];
-	if (o_json["RasterThreads"].is_number_integer())
-		settings.RasterThreads = o_json["RasterThreads"];
-	if (o_json["SimplifyOccluders"].is_boolean())
-		settings.SimplifyOccluders = o_json["SimplifyOccluders"];
-	if (o_json["OccluderTestMinRadius"].is_number())
-		settings.OccluderTestMinRadius = o_json["OccluderTestMinRadius"];
-	if (o_json["ExclusiveOcclusion"].is_boolean())
-		settings.ExclusiveOcclusion = o_json["ExclusiveOcclusion"];
-	if (o_json["OccluderMinLeafSize"].is_number())
-		settings.OccluderMinLeafSize = o_json["OccluderMinLeafSize"];
-	if (o_json["CullTreeLOD"].is_boolean())
-		settings.CullTreeLOD = o_json["CullTreeLOD"];
-	if (o_json["TreeOccluders"].is_boolean())
-		settings.TreeOccluders = o_json["TreeOccluders"];
-	if (o_json["AlphaTestedOccluders"].is_boolean())
-		settings.AlphaTestedOccluders = o_json["AlphaTestedOccluders"];
-	if (o_json["CullSmallShadows"].is_boolean())
-		settings.CullSmallShadows = o_json["CullSmallShadows"];
-	if (o_json["ShadowCullNearRadius"].is_number())
-		settings.ShadowCullNearRadius = o_json["ShadowCullNearRadius"];
-	if (o_json["ShadowCullDistSlope"].is_number())
-		settings.ShadowCullDistSlope = o_json["ShadowCullDistSlope"];
-	if (o_json["CullSunShadows"].is_boolean())
-		settings.CullSunShadows = o_json["CullSunShadows"];
+	const auto loadBool = [&](const char* key, bool& dst) {
+		if (o_json[key].is_boolean())
+			dst = o_json[key];
+	};
+	const auto loadFloat = [&](const char* key, float& dst) {
+		if (o_json[key].is_number())
+			dst = o_json[key];
+	};
 
-	SyncSettingsToMOC();
+	loadBool("EnableOcclusionTesting", settings.EnableOcclusionTesting);
+	loadFloat("HiZOcclusionBias", settings.HiZOcclusionBias);
+	loadFloat("HiZMaxCameraMotion", settings.HiZMaxCameraMotion);
+	loadFloat("ObjectTestMinRadius", settings.ObjectTestMinRadius);
+	loadBool("CullTreeLOD", settings.CullTreeLOD);
+	if (o_json["HideFrames"].is_number_unsigned())
+		settings.HideFrames = o_json["HideFrames"];
+
+	loadBool("CullSmallObjects", settings.CullSmallObjects);
+	loadFloat("ObjectCullNearRadius", settings.ObjectCullNearRadius);
+	loadFloat("ObjectCullDistSlope", settings.ObjectCullDistSlope);
+
+	loadBool("CullSmallShadows", settings.CullSmallShadows);
+	loadFloat("ShadowCullNearRadius", settings.ShadowCullNearRadius);
+	loadFloat("ShadowCullDistSlope", settings.ShadowCullDistSlope);
+
+	SyncSettings();
 }
 
 void OcclusionCulling::SaveSettings(json& o_json)
 {
 	o_json["EnableOcclusionTesting"] = settings.EnableOcclusionTesting;
-	o_json["EnableOccluderRendering"] = settings.EnableOccluderRendering;
-	o_json["OccluderMaxDistance"] = settings.OccluderMaxDistance;
-	o_json["OccluderFirstLevelMinSize"] = settings.OccluderFirstLevelMinSize;
-	o_json["MaxOccludersPerFrame"] = settings.MaxOccludersPerFrame;
-	o_json["RasterThreads"] = settings.RasterThreads;
-	o_json["SimplifyOccluders"] = settings.SimplifyOccluders;
-	o_json["OccluderTestMinRadius"] = settings.OccluderTestMinRadius;
-	o_json["ExclusiveOcclusion"] = settings.ExclusiveOcclusion;
-	o_json["OccluderMinLeafSize"] = settings.OccluderMinLeafSize;
+	o_json["HiZOcclusionBias"] = settings.HiZOcclusionBias;
+	o_json["HiZMaxCameraMotion"] = settings.HiZMaxCameraMotion;
+	o_json["ObjectTestMinRadius"] = settings.ObjectTestMinRadius;
 	o_json["CullTreeLOD"] = settings.CullTreeLOD;
-	o_json["TreeOccluders"] = settings.TreeOccluders;
-	o_json["AlphaTestedOccluders"] = settings.AlphaTestedOccluders;
+	o_json["HideFrames"] = settings.HideFrames;
+
+	o_json["CullSmallObjects"] = settings.CullSmallObjects;
+	o_json["ObjectCullNearRadius"] = settings.ObjectCullNearRadius;
+	o_json["ObjectCullDistSlope"] = settings.ObjectCullDistSlope;
+
 	o_json["CullSmallShadows"] = settings.CullSmallShadows;
 	o_json["ShadowCullNearRadius"] = settings.ShadowCullNearRadius;
 	o_json["ShadowCullDistSlope"] = settings.ShadowCullDistSlope;
-	o_json["CullSunShadows"] = settings.CullSunShadows;
 }
 
 void OcclusionCulling::RestoreDefaultSettings()
 {
 	settings = {};
-	SyncSettingsToMOC();
+	SyncSettings();
 }
+
+#undef I18N_KEY_PREFIX

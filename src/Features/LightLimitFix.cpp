@@ -3,7 +3,6 @@
 #include "InverseSquareLighting.h"
 #include "LinearLighting.h"
 
-#include "DrawCullProbe.h"
 #include "I18n/I18n.h"
 #include "Menu/ThemeManager.h"
 #include "Shadercache.h"
@@ -934,10 +933,6 @@ void LightLimitFix::AddParticleLightsToBuffer(eastl::vector<LightData>& a_lights
 template <int N>
 void LightLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE::BSRenderPass* a_pass, uint32_t a_technique, bool a_alphaTest, uint32_t a_renderFlags)
 {
-	// Measurement hook: see DrawCullProbe.h. Inert unless CS_CULL_PROBE is set.
-	if (DrawCullProbe::ShouldSkip())
-		return;
-
 	if (globals::features::lightLimitFix.CheckParticleLights(a_pass, a_technique))
 		func(a_pass, a_technique, a_alphaTest, a_renderFlags);
 }

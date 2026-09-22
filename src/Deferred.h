@@ -3,6 +3,7 @@
 #include <DirectXMath.h>
 
 #include "Buffer.h"
+#include "Features/GrassOptimizations/HiZPyramid.h"
 #include "RE/B/BSShadowDirectionalLight.h"
 #include "Utils/VersionedRelocation.h"
 
@@ -58,6 +59,26 @@ public:
 
 	/** @brief Runs feature prepasses between StartDeferred and geometry rendering. */
 	void PrepassPasses();
+
+	/**
+	 * @brief Builds the shared Hi-Z depth pyramid for this frame.
+	 *
+	 * Called from the depth-copy hook, once the opaque depth is complete and before water
+	 * renders. Any feature wanting a max-depth pyramid reads \ref hiZ rather than building its
+	 * own.
+	 *
+	 * Built here rather than at present because occlusion culling reads it back to system
+	 * memory, and a readback's staleness is decided by how early the copy is queued.
+	 */
+	void BuildHiZ();
+
+	/**
+	 * @brief Max-depth mip pyramid over this frame's opaque depth, or invalid when unused.
+	 *
+	 * A texel at level N is the farthest depth of everything beneath it. Built once per frame by
+	 * \ref BuildHiZ.
+	 */
+	HiZPyramid hiZ;
 
 	/** @brief Releases cached composite compute shaders, forcing recompilation on next use. */
 	void ClearShaderCache();

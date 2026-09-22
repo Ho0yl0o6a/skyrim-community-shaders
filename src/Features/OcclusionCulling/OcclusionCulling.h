@@ -2,21 +2,17 @@
 
 #include "Feature.h"
 
-#include <RE/B/BSTEvent.h>
-#include <RE/M/MenuOpenCloseEvent.h>
-
-// -----------------------------------------------------------------------------
-// OcclusionCulling — CommunityShaders Feature wrapper around the MOC port.
-//
-// V1: installs a hook on BSCullingProcess so that (a) once per frame, before the
-// main cull walk, the MOC depth buffer is rebuilt from large static occluders, and
-// (b) each processed scene object is occlusion-tested and skipped if provably
-// hidden. Everything is gated behind the feature settings AND the env var
-// CS_OCCLUSION=1 (off by default).
-//
-// SE 1.5.97 ONLY.
-// -----------------------------------------------------------------------------
-
+/**
+ * @brief CPU occlusion culling for the main view, against the GPU's Hi-Z depth pyramid.
+ *
+ * Hooks the engine's scene-graph cull walk and skips objects that are provably hidden, so the
+ * draw is never issued. Worth more under DXVK than on the native driver, which pays less per
+ * draw on the render thread.
+ *
+ * The buffer is built by \ref Deferred::BuildHiZ and copied back by \ref HiZReadback; this
+ * feature only reads it. Three culls, each independently switchable: occlusion, small objects,
+ * and small shadow casters.
+ */
 struct OcclusionCulling : public Feature
 {
 	static OcclusionCulling* GetSingleton()
@@ -27,62 +23,52 @@ struct OcclusionCulling : public Feature
 
 	struct Settings
 	{
-		// Off until asked for. The header above says the feature is gated behind the settings
-		// AND CS_OCCLUSION=1, but defaulting this to true made the env var meaningless and any
-		// A/B measured culling against culling.
-		bool  EnableOcclusionTesting = false;
-		bool  EnableOccluderRendering = true;
-		float OccluderMaxDistance = 20000.0f;
-		float OccluderFirstLevelMinSize = 200.0f;
-		// Raster budget per frame, closest-first (not a MOC library limit). With the
-		// threaded raster + simplified meshes the default covers typical scenes fully.
-		std::int32_t MaxOccludersPerFrame = 384;
-		// CullingThreadpool worker count; applied at boot (pool is created once).
-		std::int32_t RasterThreads = 4;
-		// meshopt_simplify occluder meshes at cache time (~half the indices). Off here:
-		// meshopt_simplifySloppy faults on this runtime's decoded geometry (AV inside
-		// GetCachedGeometry on a garbage pointer), so the occluders are rasterized at full
-		// resolution until the decode is proven to hand meshopt valid input.
-		bool SimplifyOccluders = false;
-		// Only objects with at least this world-bound radius are occlusion-tested.
-		float OccluderTestMinRadius = 0.0f;
-		// Neutralize vanilla occlusion planes: MOC is the only occlusion mechanism.
-		bool ExclusiveOcclusion = false;
-		bool CullTreeLOD = false;   // measured net cost at open venues; enable for dense forests
-		bool TreeOccluders = false;  // measured net cost at open venues; enable for dense forests
-		bool AlphaTestedOccluders = false;
-		bool  CullSunShadows = false;  // venue/time-conditional occlusion; experimental
-		bool  CullSmallShadows = true;   // distance-scaled small-caster contribution cull (HZD-style)
+		/// Master gate. Every cull in this feature is behind it, so toggling it is a true A/B.
+		bool EnableOcclusionTesting = false;
+
+		// --- occlusion ---------------------------------------------------------------------
+
+		/// NDC-z tolerance on the depth comparison. Only ever makes culling less likely.
+		float HiZOcclusionBias = 0.0005f;
+		/// Camera travel since the snapshot is the only thing that can reveal hidden geometry.
+		/// Past this the snapshot is refused outright.
+		float HiZMaxCameraMotion = 1024.0f;
+		/// Do not occlusion-test bounds below this world radius; the draw saved is not worth it.
+		float ObjectTestMinRadius = 0.0f;
+		/// Occlusion-test distant-tree LOD instance groups. Off by default: a net cost at open
+		/// venues, where the groups are large and rarely fully hidden.
+		bool CullTreeLOD = false;
+
+		/// Consecutive frames an object must read hidden before it is culled; 1 disables the
+		/// hysteresis. Culling on a single reading lets distant LOD flicker.
+		std::uint32_t HideFrames = 2;
+
+		// --- small objects ------------------------------------------------------------------
+
+		/// Drop objects whose bounding sphere is smaller than (near + slope * distance). Off by
+		/// default: a slight net loss where clutter is sparse, since anything small enough to
+		/// qualify was already cheap to draw.
+		bool  CullSmallObjects = false;
+		float ObjectCullNearRadius = 8.0f;
+		float ObjectCullDistSlope = 0.004f;
+
+		// --- small shadow casters -----------------------------------------------------------
+
+		/// The same rule on the sun's caster gather, where a rejection removes the caster from
+		/// every cascade. Screen-space shadows regenerate the near-field contact shadows those
+		/// casters would have contributed.
+		bool  CullSmallShadows = true;
 		float ShadowCullNearRadius = 32.0f;
 		float ShadowCullDistSlope = 0.012f;
-		// Gather leaf gate: occluder meshes smaller than this are not rasterized.
-		float OccluderMinLeafSize = 100.0f;
 	};
 
 	Settings settings;
 
-	// Master runtime gate, driven by the CS_OCCLUSION=1 env var (read once at load).
-	// When false, the installed hooks are inert pass-throughs.
-	bool envEnabled = false;
-
-	// DIAGNOSTIC (env CS_MOC_FORCE_CULL, never persisted): force-cull % of kept objects.
-	std::int32_t diagForceCullPercent = 0;
-
 	virtual std::string GetName() override { return "Occlusion Culling"; }
 	virtual std::string GetShortName() override { return "OcclusionCulling"; }
 
-	/** @brief Installs the BSCullingProcess hooks and creates the MOC instance. */
+	/** @brief Installs the cull-walk hooks. */
 	virtual void PostPostLoad() override;
-
-	/** @brief Render-thread hook: env-gated verification dumps (CS_MOC_DUMP=1). */
-	virtual void Prepass() override;
-
-	/** @brief Menu open/close sink: quiesces the builder before scene teardown (loading screens). */
-	class MenuEventSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
-	{
-	public:
-		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
-	};
 
 	virtual void DrawSettings() override;
 
@@ -90,14 +76,14 @@ struct OcclusionCulling : public Feature
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 
-	// This feature has no shader .ini, so it is force-loaded in PostPostLoad. Neutralize
-	// the disk-cache machinery (which assumes an ini version) so it can't crash/invalidate.
+	// This feature has no shader .ini, so it is force-loaded in PostPostLoad. Neutralize the
+	// disk-cache machinery, which assumes an ini version.
 	virtual bool ValidateCache(CSimpleIniA&) override { return true; }
 	virtual void WriteDiskCacheInfo(CSimpleIniA&) override {}
 
-	/** @brief Pushes the current settings into the MOC runtime globals. */
-	void SyncSettingsToMOC();
+	/** @brief Pushes the current settings into the cull module. */
+	void SyncSettings();
 
-	/** @brief True when the master env gate + testing setting are both on. */
+	/** @brief True when the feature is loaded and testing is enabled. */
 	bool IsActive() const;
 };

@@ -9,9 +9,3 @@
 	path = extern/dxvk
 	url = https://github.com/community-shaders/dxvk.git
 	branch = interop
-[submodule "extern/MaskedOcclusionCulling"]
-	path = extern/MaskedOcclusionCulling
-	url = https://github.com/GameTechDev/MaskedOcclusionCulling.git
-[submodule "extern/meshoptimizer"]
-	path = extern/meshoptimizer
-	url = https://github.com/zeux/meshoptimizer.git

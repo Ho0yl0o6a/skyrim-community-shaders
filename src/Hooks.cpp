@@ -6,7 +6,6 @@
 #include "Utils/VersionedRelocation.h"
 
 #include "Aftermath.h"
-#include "D3D11CallFilter.h"
 #include "D3DX9MathUpgrade.h"
 #include "DxvkLoader.h"
 #include "Feature.h"
@@ -20,7 +19,7 @@
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
 #include "Features/LightLimitFix.h"
-#include "Features/OcclusionCulling/MOC.h"
+#include "Features/OcclusionCulling/HiZCull.h"
 #include "Features/ScreenshotFeature.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
@@ -390,8 +389,7 @@ struct IDXGISwapChain_Present
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
 		globals::state->Reset();
-		D3D11CallFilter::OnPresent();
-		MOC::BeginFrame();
+		HiZCull::BeginFrame();
 
 		// DLSS-G on Vulkan requires SyncInterval 0.
 		{
@@ -724,7 +722,6 @@ namespace Hooks
 			stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(globals::d3d::device);
 
 			globals::InstallD3DHooks(globals::d3d::context);
-			D3D11CallFilter::Install(globals::d3d::context);
 
 			globals::menu->Init();
 		}
