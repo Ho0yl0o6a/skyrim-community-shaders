@@ -2057,6 +2057,9 @@ namespace SIE
 			hlslToShaderMap.clear();
 		}
 		compilationSet.Clear();
+		// The features below recompile from source through Util::CompileShader, which caches
+		// bytecode; a recompile means that cache is what we are trying to get rid of.
+		Util::ClearShaderCompileCache();
 		globals::deferred->ClearShaderCache();
 		for (auto* feature : Feature::GetFeatureList()) {
 			if (feature->loaded) {

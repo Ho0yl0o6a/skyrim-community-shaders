@@ -7,7 +7,9 @@
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
 #include <d3dcompiler.h>
+#include <filesystem>
 #include <mutex>
+#include <unordered_map>
 
 namespace Util
 {
@@ -141,6 +143,29 @@ namespace Util
 		}
 	};
 
+	namespace
+	{
+		// Compiled bytecode, keyed by everything that can change it. Features compile their
+		// shaders from SetupResources, and the game re-runs that on every render-target rebuild
+		// -- i.e. on every window resize, minimize included. Recompiling from source there costs
+		// hundreds of milliseconds per feature and is the bulk of an alt-tab freeze; creating the
+		// device object from cached bytecode costs microseconds.
+		struct CompiledShader
+		{
+			winrt::com_ptr<ID3DBlob>        blob;
+			std::filesystem::file_time_type sourceTime{};
+		};
+
+		std::mutex                                     g_compileCacheMutex;
+		std::unordered_map<std::string, CompiledShader> g_compileCache;
+	}
+
+	void ClearShaderCompileCache()
+	{
+		std::scoped_lock lock{ g_compileCacheMutex };
+		g_compileCache.clear();
+	}
+
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program)
 	{
 		auto device = globals::d3d::device;
@@ -202,20 +227,42 @@ namespace Util
 		if (globals::shaderCache->IsDiskCache())
 			flags |= D3DCOMPILE_SKIP_VALIDATION;
 
-		ID3DBlob* shaderBlob;
-		ID3DBlob* shaderErrors;
+		// The key has to cover everything above that reaches the compiler: the source, the entry
+		// point, the target, the fully-resolved macro list (which already folds in developer mode
+		// and the global defines) and the compile flags.
+		const std::string cacheKey = std::format("{}|{}|{}|{:#x}|{}", str, Program, ProgramType, flags, DefinesToString(macros));
 
-		if (!std::filesystem::exists(FilePath)) {
+		std::error_code ec;
+		const auto sourceTime = std::filesystem::last_write_time(FilePath, ec);
+		if (ec) {
 			logger::error("Failed to compile shader; {} does not exist", str);
 			return nullptr;
 		}
-		logger::debug("Compiling {} with {}", str, DefinesToString(macros));
-		if (FAILED(D3DCompileFromFile(FilePath, macros.data(), &include, Program, ProgramType, flags, 0, &shaderBlob, &shaderErrors))) {
-			logger::warn("Shader compilation failed:\n\n{}", shaderErrors ? static_cast<char*>(shaderErrors->GetBufferPointer()) : "Unknown error");
-			return nullptr;
+
+		// An entry is reused only while the source file it came from is untouched, so editing a
+		// shader still takes effect without a restart. Includes are not tracked -- use the
+		// shader-cache clear in the menu after editing an .hlsli.
+		winrt::com_ptr<ID3DBlob> shaderBlob;
+		{
+			std::scoped_lock lock{ g_compileCacheMutex };
+			if (auto it = g_compileCache.find(cacheKey); it != g_compileCache.end() && it->second.sourceTime == sourceTime)
+				shaderBlob = it->second.blob;
 		}
-		if (shaderErrors)
-			logger::debug("Shader logs:\n{}", static_cast<char*>(shaderErrors->GetBufferPointer()));
+
+		if (!shaderBlob) {
+			winrt::com_ptr<ID3DBlob> shaderErrors;
+			logger::debug("Compiling {} with {}", str, DefinesToString(macros));
+			if (FAILED(D3DCompileFromFile(FilePath, macros.data(), &include, Program, ProgramType, flags, 0, shaderBlob.put(), shaderErrors.put()))) {
+				logger::warn("Shader compilation failed:\n\n{}", shaderErrors ? static_cast<char*>(shaderErrors->GetBufferPointer()) : "Unknown error");
+				return nullptr;
+			}
+			if (shaderErrors)
+				logger::debug("Shader logs:\n{}", static_cast<char*>(shaderErrors->GetBufferPointer()));
+
+			std::scoped_lock lock{ g_compileCacheMutex };
+			g_compileCache.insert_or_assign(cacheKey, CompiledShader{ shaderBlob, sourceTime });
+		}
+
 		if (!_stricmp(ProgramType, "ps_5_0")) {
 			ID3D11PixelShader* regShader;
 			DX::ThrowIfFailed(device->CreatePixelShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &regShader));

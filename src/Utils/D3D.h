@@ -51,6 +51,13 @@ namespace Util
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program = "main");
 
 	/**
+	 * @brief Drops the bytecode CompileShader caches, so the next call reads the source again.
+	 *
+	 * Call this whenever the shaders on disk may have changed, or the defines that feed them.
+	 */
+	void ClearShaderCompileCache();
+
+	/**
 	 * @brief Apply an alpha-blended highlight tint to a texture via CPU staging copy.
 	 * @param texture The texture to tint.
 	 * @param isHighlighted When false the function is a no-op.
