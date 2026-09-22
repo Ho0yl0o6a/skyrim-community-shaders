@@ -281,12 +281,34 @@ void State::Reset()
 	activeReflections = false;
 }
 
+// Video memory currently in use by this process, or 0 when it cannot be read.
+static std::int64_t VideoMemoryInUse()
+{
+	static winrt::com_ptr<IDXGIAdapter3> adapter;
+	if (!adapter) {
+		if (auto* device = globals::d3d::device) {
+			winrt::com_ptr<IDXGIDevice> dxgiDevice;
+			winrt::com_ptr<IDXGIAdapter> baseAdapter;
+			if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()))) &&
+				SUCCEEDED(dxgiDevice->GetAdapter(baseAdapter.put())))
+				baseAdapter->QueryInterface(IID_PPV_ARGS(adapter.put()));
+		}
+	}
+	DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+	if (adapter && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+		return static_cast<std::int64_t>(info.CurrentUsage);
+	return 0;
+}
+
 void State::Setup()
 {
 	// Detect Moon and Stars mod for compatibility adjustments
 	moonAndStarsLoaded = GetModuleHandle(L"po3_MoonMod.dll") != nullptr;
 	if (moonAndStarsLoaded)
 		logger::info("Moon and Stars detected, compatibility enabled");
+
+	const auto vramAtEntry = VideoMemoryInUse();
+	std::int64_t featureVramBytes = 0;
 
 	globals::features::truePBR.SetupResources();
 	SetupResources();
@@ -299,26 +321,13 @@ void State::Setup()
 	// feature that reloads from disk here shows up as a multi-second freeze on alt-tab, so name
 	// the expensive ones rather than leaving the cost anonymous.
 	{
-		// Video memory in use, to attribute a rebuild's allocation to the feature doing it.
+		// Per-feature video memory, to attribute a rebuild's allocation to the feature doing it.
 		//
 		// This is ALLOCATION, not leak: a feature that correctly frees and rebuilds a 130 MB set
 		// of textures reports +130 MB here, because the new resources exist by the time the
 		// second reading is taken. Use it to find which feature is churning, then prove whether
 		// anything leaks by watching total process VRAM across repeated rebuilds.
-		winrt::com_ptr<IDXGIAdapter3> adapter;
-		if (auto* device = globals::d3d::device) {
-			winrt::com_ptr<IDXGIDevice> dxgiDevice;
-			winrt::com_ptr<IDXGIAdapter> baseAdapter;
-			if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()))) &&
-				SUCCEEDED(dxgiDevice->GetAdapter(baseAdapter.put())))
-				baseAdapter->QueryInterface(IID_PPV_ARGS(adapter.put()));
-		}
-		const auto usedBytes = [&adapter]() -> std::int64_t {
-			DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-			if (adapter && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
-				return static_cast<std::int64_t>(info.CurrentUsage);
-			return 0;
-		};
+		const auto usedBytes = []() { return VideoMemoryInUse(); };
 
 		struct FeatureCost
 		{
@@ -355,6 +364,10 @@ void State::Setup()
 		}
 		if (!growth.empty())
 			logger::info("[Setup] video memory allocated: {}", growth);
+
+		featureVramBytes = 0;
+		for (const auto& cost : costs)
+			featureVramBytes += cost.bytes;
 	}
 	globals::deferred->SetupResources();
 
@@ -363,6 +376,14 @@ void State::Setup()
 
 	// Load scene-specific settings (Interior Only, etc.)
 	globals::sceneSettingsManager->LoadAll();
+
+	// Whatever the features did not account for came from the deferred G-buffer targets, this
+	// class's own resources, or the game's rebuild underneath us. Reported separately so a leak
+	// outside the feature loop cannot hide behind the per-feature numbers.
+	const auto totalBytes = VideoMemoryInUse() - vramAtEntry;
+	const auto toMB = [](std::int64_t a_bytes) { return static_cast<double>(a_bytes) / (1024.0 * 1024.0); };
+	logger::info("[Setup] video memory total {:.0f}MB: features {:.0f}MB, elsewhere {:.0f}MB",
+		toMB(totalBytes), toMB(featureVramBytes), toMB(totalBytes - featureVramBytes));
 }
 
 static std::string GetConfigPath(State::ConfigMode a_configMode)
