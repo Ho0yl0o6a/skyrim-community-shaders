@@ -133,6 +133,15 @@ public:
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/** @brief Returns no alpha group once the engine's fixed alpha group pool is full, instead of overrunning it. */
+	struct BSShaderAccumulator_StartGroupingAlphas
+	{
+		static constexpr std::uint32_t POOL_SIZE = 512;
+
+		static RE::BSBatchRenderer::GeometryGroup* thunk(RE::BSShaderAccumulator* accumulator, RE::NiBound* bound);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	// Event handler
 	class MenuOpenCloseEventHandler : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{

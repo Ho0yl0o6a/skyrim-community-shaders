@@ -300,6 +300,8 @@ void Skylighting::PostPostLoad()
 
 	stl::write_thunk_call<SetViewFrustum>(REL::RelocationID(25643, 26185).address() + REL::Relocate(0x5D9, 0x59D));
 
+	stl::write_vfunc<0x28, BSShaderAccumulator_StartGroupingAlphas>(RE::VTABLE_BSShaderAccumulator[0]);
+
 	MenuOpenCloseEventHandler::Register();
 }
 
@@ -651,6 +653,19 @@ void Skylighting::CaptureShadowCascadeSRV()
 void Skylighting::Main_Precipitation_RenderOcclusion::thunk()
 {
 	globals::features::skylighting.RenderOcclusion();
+}
+
+RE::BSBatchRenderer::GeometryGroup* Skylighting::BSShaderAccumulator_StartGroupingAlphas::thunk(RE::BSShaderAccumulator* accumulator, RE::NiBound* bound)
+{
+	// The engine allocates from this pool without a bounds check; callers already handle a null group
+	static REL::Relocation<std::uint32_t*> poolCount{ REL::RelocationID(528319, 415271) };
+	if (*poolCount >= POOL_SIZE) {
+		static bool warned = false;
+		if (!std::exchange(warned, true))
+			logger::warn("[SKYLIGHTING] Alpha group pool full, extra ordered geometry renders unsorted");
+		return nullptr;
+	}
+	return func(accumulator, bound);
 }
 
 RE::BSEventNotifyControl Skylighting::MenuOpenCloseEventHandler::ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
