@@ -30,6 +30,7 @@
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
 #include "Features/Skylighting.h"
+#include "Features/SnowDeformation.h"
 #include "Features/SubsurfaceScattering.h"
 #include "Features/TerrainBlending.h"
 #include "Features/TerrainHelper.h"
@@ -238,6 +239,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::screenSpaceGI,
 		&globals::features::skylighting,
 		&globals::features::skySync,
+		&globals::features::snowDeformation,
 		&globals::features::terrainBlending,
 		&globals::features::terrainHelper,
 		&globals::features::volumetricLighting,
