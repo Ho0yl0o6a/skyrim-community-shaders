@@ -34,7 +34,8 @@ void SnowDeformation::DrawSettings()
 			ImGui::Checkbox(T(TKEY("show_debug"), "Show Deformation Map"), &settings.ShowDebugTexture);
 			if (settings.ShowDebugTexture) {
 				ImGui::Text("%s", T(TKEY("debug_hint"), "White = compressed snow. The map follows the camera."));
-				ImGui::Image(GetDeformationSRV(), { 512.0f, 512.0f });
+				if (auto* deformationSRV = GetDeformationSRV())
+					ImGui::Image(deformationSRV, { 512.0f, 512.0f });
 			}
 
 			if (ImGui::Button(T(TKEY("clear"), "Clear Deformation Map")))
@@ -44,13 +45,13 @@ void SnowDeformation::DrawSettings()
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T(TKEY("debug_overlay_tooltip"), "Paints diagnostics on terrain: red = outside deformation window, green = deformation, blue = detected snow."));
 
+			ImGui::Text("Snow mask cache: %zu entries, %llu hits, %llu misses",
+				snowMasksSizeForUI(),
+				(unsigned long long)landMaskHits.load(std::memory_order_relaxed),
+				(unsigned long long)landMaskMisses.load(std::memory_order_relaxed));
+
 			ImGui::TreePop();
 		}
-
-		ImGui::Text("Snow mask cache: %zu entries, %llu hits, %llu misses",
-			snowMasksSizeForUI(),
-			(unsigned long long)landMaskHits.load(std::memory_order_relaxed),
-			(unsigned long long)landMaskMisses.load(std::memory_order_relaxed));
 
 		ImGui::TreePop();
 	}

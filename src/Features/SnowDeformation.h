@@ -82,6 +82,7 @@ public:
 		float RefillAmount;
 		uint ClearMap;
 
+		/** @brief Per stamp: xy capsule segment end (current position), z depth, w 1 / radius^2. */
 		float4 Stamps[kMaxStamps];
 		/** @brief Capsule segment start per stamp (the stamped shape's previous position). */
 		float4 StampEnds[kMaxStamps];
@@ -95,7 +96,7 @@ public:
 	uint currentTexture = 0;
 
 	/** @brief SRV of the most recently written deformation map, for shader sampling and debug UI. */
-	ID3D11ShaderResourceView* GetDeformationSRV() const { return deformationTextures[currentTexture]->srv.get(); }
+	ID3D11ShaderResourceView* GetDeformationSRV() const { return deformationTextures[currentTexture] ? deformationTextures[currentTexture]->srv.get() : nullptr; }
 	/** @brief World XY of the corner of texel (0,0) of the current deformation window. */
 	float2 GetWindowOrigin() const { return windowOrigin; }
 
@@ -111,6 +112,8 @@ public:
 	/** @brief Returns the deformation update compute shader, compiling it on first use. */
 	ID3D11ComputeShader* GetDeformationUpdateCS();
 	ID3D11ComputeShader* deformationUpdateCS = nullptr;
+	/** @brief Set when the compile fails, so it is not retried every frame; cleared by ClearShaderCache. */
+	bool deformationUpdateCSFailed = false;
 	virtual void ClearShaderCache() override;
 
 	/** @brief Draws the ImGui settings UI, including the debug view of the deformation map. Implemented in SnowDeformation/Menu.cpp. */

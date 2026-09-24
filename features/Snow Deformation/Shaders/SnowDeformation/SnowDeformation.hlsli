@@ -55,4 +55,34 @@ namespace SnowDeformation
 		}
 		return deformation;
 	}
+
+	// Snow share of a landscape pixel's layer weights.
+	float LandSnowness(float4 blendWeights1, float2 blendWeights2)
+	{
+#if defined(TRUE_PBR)
+		// PBR terrain replaces the vanilla per-layer snow constants, so the
+		// CPU side publishes per-tile snow-material bits via the permutation
+		// data (see SnowDeformation::BSLightingShader_SetupMaterial).
+		uint snowTileBits = (Permutation::ExtraFeatureDescriptor & Permutation::ExtraFeatureFlags::SnowLandIsSnowMask) >> Permutation::ExtraFeatureFlags::SnowLandIsSnowShift;
+		float4 snowIsSnow1to4 = float4(snowTileBits & 1, (snowTileBits >> 1) & 1, (snowTileBits >> 2) & 1, (snowTileBits >> 3) & 1);
+		float2 snowIsSnow5to6 = float2((snowTileBits >> 4) & 1, (snowTileBits >> 5) & 1);
+		return saturate(dot(blendWeights1, snowIsSnow1to4) + dot(blendWeights2, snowIsSnow5to6));
+#else
+		return saturate(dot(blendWeights1, LandscapeTexture1to4IsSnow) + blendWeights2.x * LandscapeTexture5to6IsSnow.x + blendWeights2.y * LandscapeTexture5to6IsSnow.y);
+#endif
+	}
+
+	// Diagnostic overlay: R = outside deformation window, G = raw deformation
+	// sample, B = detected snowness. Takes the weights after EM height blending.
+	void DebugLandOverlay(inout float3 baseColor, float2 worldXYRel, float4 blendWeights1, float2 blendWeights2)
+	{
+		[branch] if ((SharedData::snowDeformationSettings.DebugTerrainOverlay & 1) != 0)
+		{
+			float2 debugWorldXY = worldXYRel + FrameBuffer::CameraPosAdjust.xy;
+			float2 debugUV = GetDeformationUV(debugWorldXY);
+			float debugOutside = (all(debugUV > 0.0) && all(debugUV < 1.0)) ? 0.0 : 1.0;
+			float debugDeformation = GetDeformation(debugWorldXY);
+			baseColor = lerp(baseColor, float3(debugOutside, debugDeformation, LandSnowness(blendWeights1, blendWeights2)), 0.75);
+		}
+	}
 }

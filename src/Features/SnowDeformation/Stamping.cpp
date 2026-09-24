@@ -18,18 +18,24 @@ static constexpr float kStampMovementGate = 3.0f;
 static constexpr float kCorpseWakeDistance = 50.0f;
 static constexpr uint16_t kCorpseSettleFrames = 90;
 
+// Stamps carry 1 / radius^2 so the update shader's per-texel test needs no divide.
+static float StampInvRadiusSq(float a_radius)
+{
+	return 1.0f / std::max(a_radius * a_radius, 1e-4f);
+}
+
 void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 {
 	uint stampCount = 0;
 	RE::NiPoint3 cameraPosition = Util::GetEyePosition();
 	std::unordered_map<uint64_t, float2> currentPositions;
+	// Refs skipped this frame (stamp budget, props at rest) whose anchors carry over.
+	std::unordered_set<uint32_t> anchoredRefs;
 
 	// Stamps come from actors' Havok collision shapes (Util::GetShapeBound
 	// over TraverseScenegraphCollision), so feet, legs and ragdoll limbs
 	// carve individually.
 	auto addStamps = [&](RE::ActorHandle a_handle) {
-		if (stampCount >= kMaxStamps)
-			return;
 		auto actor = a_handle.get();
 		if (!actor || !actor->Is3DLoaded())
 			return;
@@ -42,6 +48,10 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 			return;
 
 		const uint32_t formID = actor->formID;
+		if (stampCount >= kMaxStamps) {
+			anchoredRefs.insert(formID);
+			return;
+		}
 		// The dead carve only while moving; at rest the refill buries them.
 		// No first-sight waiver: decapitation swaps the 3D, and a waiver
 		// would re-trench under already-buried corpses.
@@ -73,8 +83,10 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 			if (Util::GetShapeBound(a_object, centerPos, radius)) {
 				// Stable per-skeleton traversal order keys the trail history.
 				const uint32_t thisIndex = shapeIndex++;
-				if (stampCount >= kMaxStamps)
+				if (stampCount >= kMaxStamps) {
+					anchoredRefs.insert(formID);
 					return RE::BSVisit::BSVisitControl::kStop;
+				}
 				if (centerPos.z - radius > groundZ + kStampSurfaceBand)
 					return RE::BSVisit::BSVisitControl::kContinue;
 				if (radius < kMinStampShapeRadius || radius > kMaxStampShapeRadius)
@@ -116,7 +128,7 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 				stamp.y = current.y;
 				stamp.z = 1.0f;
 				// StampRadius scales the shape's own radius.
-				stamp.w = radius * settings.StampRadius / kStampRadiusNeutral;
+				stamp.w = StampInvRadiusSq(radius * settings.StampRadius / kStampRadiusNeutral);
 				perFrameData.Stamps[stampCount] = stamp;
 				perFrameData.StampEnds[stampCount] = { previous.x, previous.y, 0.0f, 0.0f };
 				stampCount++;
@@ -194,10 +206,12 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 			// of resetting every frame.
 			const bool propMoved = position.GetSquaredDistance(prevIt->second) >= kStampMovementGate * kStampMovementGate;
 			currentPropPositions[formID] = propMoved ? position : prevIt->second;
-			if (!propMoved)
-				return RE::BSContainer::ForEachResult::kContinue;  // at rest: the refill buries it
-			if (stampCount >= kMaxStamps)
-				return RE::BSContainer::ForEachResult::kContinue;  // keep collecting anchors
+			if (!propMoved || stampCount >= kMaxStamps) {
+				// At rest the refill buries it; past the budget it waits. Either
+				// way its shapes keep their anchors for when it next stamps.
+				anchoredRefs.insert(formID);
+				return RE::BSContainer::ForEachResult::kContinue;
+			}
 
 			// Ground = land height, so mid-air flight paths do not carve.
 			float groundZ = position.z;
@@ -209,8 +223,10 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 				float radius;
 				if (Util::GetShapeBound(a_object, centerPos, radius)) {
 					const uint32_t thisIndex = shapeIndex++;
-					if (stampCount >= kMaxStamps)
+					if (stampCount >= kMaxStamps) {
+						anchoredRefs.insert(formID);
 						return RE::BSVisit::BSVisitControl::kStop;
+					}
 					if (centerPos.z - radius > groundZ + kStampSurfaceBand)
 						return RE::BSVisit::BSVisitControl::kContinue;
 					if (radius < kMinStampShapeRadius || radius > kMaxStampShapeRadius)
@@ -233,7 +249,7 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 					stamp.x = current.x;
 					stamp.y = current.y;
 					stamp.z = 1.0f;
-					stamp.w = radius * settings.StampRadius / kStampRadiusNeutral;
+					stamp.w = StampInvRadiusSq(radius * settings.StampRadius / kStampRadiusNeutral);
 					perFrameData.Stamps[stampCount] = stamp;
 					perFrameData.StampEnds[stampCount] = { previous.x, previous.y, 0.0f, 0.0f };
 					stampCount++;
@@ -243,6 +259,8 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 
 			// Shape types with no bound extractor (MOPP/list): one stamp from
 			// the root's bound sphere.
+			if (shapeIndex == 0 && stampCount >= kMaxStamps)
+				anchoredRefs.insert(formID);
 			if (shapeIndex == 0 && stampCount < kMaxStamps) {
 				const auto& bound = root->worldBound;
 				float radius = std::clamp(bound.radius, kMinStampShapeRadius, kMaxStampShapeRadius);
@@ -262,7 +280,7 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 					stamp.x = current.x;
 					stamp.y = current.y;
 					stamp.z = 1.0f;
-					stamp.w = radius * settings.StampRadius / kStampRadiusNeutral;
+					stamp.w = StampInvRadiusSq(radius * settings.StampRadius / kStampRadiusNeutral);
 					perFrameData.Stamps[stampCount] = stamp;
 					perFrameData.StampEnds[stampCount] = { previous.x, previous.y, 0.0f, 0.0f };
 					stampCount++;
@@ -273,6 +291,14 @@ void SnowDeformation::GatherStamps(PerFrame& perFrameData)
 	}
 	propPrevPositions = std::move(currentPropPositions);
 
+	// Skipped refs keep their anchors, so their next stamp bridges the gap
+	// instead of restarting as a point.
+	if (!anchoredRefs.empty()) {
+		for (const auto& [key, anchor] : stampPrevPositions) {
+			if (anchoredRefs.contains(uint32_t(key >> 16)))
+				currentPositions.try_emplace(key, anchor);
+		}
+	}
 	stampPrevPositions = std::move(currentPositions);
 	perFrameData.StampCount = stampCount;
 }

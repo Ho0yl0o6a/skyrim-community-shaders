@@ -3,11 +3,31 @@
 #include "Globals.h"
 #include "State.h"
 
-/** @brief True when a land texture's material is snow (the classification the vanilla shader constants encode). */
+// Mirror of Permutation::ExtraFeatureFlags::SnowLandIsSnowShift.
+static constexpr uint32_t kSnowLandIsSnowShift = 11;
+static_assert(uint32_t(State::ExtraFeatureDescriptors::SnowLandIsSnowMask) == (0x3Fu << kSnowLandIsSnowShift));
+
+// Diffuse-path substrings of the vanilla snow families. Matched on the texture
+// rather than a material flag, so other deformable ground can be added here.
+static constexpr std::array kSnowDiffuseKeys = { "grasssnow"sv, "snowpath"sv, "snowrocks"sv, "snow01"sv, "snow02"sv };
+
+/** @brief True when a land texture is snow: its diffuse path names a snow family, or failing that its Havok material is snow. */
 static bool IsSnowLandTexture(RE::TESLandTexture* a_landTexture)
 {
 	if (!a_landTexture || a_landTexture->formID == 0)
 		return false;
+
+	if (a_landTexture->textureSet) {
+		if (const char* path = a_landTexture->textureSet->GetTexturePath(RE::BSTextureSet::Texture::kDiffuse)) {
+			std::string lowered(path);
+			std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+				[](unsigned char c) { return (char)std::tolower(c); });
+			for (const auto key : kSnowDiffuseKeys) {
+				if (lowered.find(key) != std::string::npos)
+					return true;
+			}
+		}
+	}
 
 	return a_landTexture->materialType &&
 	       (a_landTexture->materialType->materialID == RE::MATERIAL_ID::kSnow ||
@@ -76,7 +96,7 @@ void SnowDeformation::BSLightingShader_SetupMaterial(RE::BSLightingShaderMateria
 	}
 
 	landMaskHits.fetch_add(1, std::memory_order_relaxed);
-	state->permutationData.ExtraFeatureDescriptor |= uint32_t(mask) << 11;
+	state->permutationData.ExtraFeatureDescriptor |= uint32_t(mask) << kSnowLandIsSnowShift;
 }
 
 struct SD_TESObjectLAND_SetupMaterial
@@ -98,9 +118,6 @@ struct SD_BSLightingShader_SetupMaterial
 {
 	static void thunk(RE::BSLightingShader* shader, RE::BSLightingShaderMaterialBase const* material)
 	{
-		if (!material)
-			return;
-
 		func(shader, material);
 
 		auto& snowDeformation = globals::features::snowDeformation;

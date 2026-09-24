@@ -1261,26 +1261,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float4 blendedRMAOS = 0;
 #		endif
 
-#		if defined(SNOW_DEFORMATION)
-	// Per-tile snow detection: how much of this pixel's landscape blend is
-	// snow material.
-	float snowDeformationSnowness = 0.0;
-	[branch] if (SharedData::snowDeformationSettings.EnableSnowDeformation)
-	{
-#			if defined(TRUE_PBR)
-		// PBR terrain replaces the vanilla per-layer snow constants, so the
-		// CPU side publishes per-tile snow-material bits via the permutation
-		// data (see SnowDeformation::BSLightingShader_SetupMaterial).
-		uint snowTileBits = (Permutation::ExtraFeatureDescriptor & Permutation::ExtraFeatureFlags::SnowLandIsSnowMask) >> Permutation::ExtraFeatureFlags::SnowLandIsSnowShift;
-		float4 snowIsSnow1to4 = float4(snowTileBits & 1, (snowTileBits >> 1) & 1, (snowTileBits >> 2) & 1, (snowTileBits >> 3) & 1);
-		float2 snowIsSnow5to6 = float2((snowTileBits >> 4) & 1, (snowTileBits >> 5) & 1);
-		snowDeformationSnowness = saturate(dot(input.LandBlendWeights1, snowIsSnow1to4) + dot(input.LandBlendWeights2.xy, snowIsSnow5to6));
-#			else
-		snowDeformationSnowness = saturate(dot(input.LandBlendWeights1, LandscapeTexture1to4IsSnow) + input.LandBlendWeights2.x * LandscapeTexture5to6IsSnow.x + input.LandBlendWeights2.y * LandscapeTexture5to6IsSnow.y);
-#			endif
-	}
-#		endif
-
 #		if defined(EMAT)
 	if (LANDSCAPE_PARALLAX_ENABLED) {
 		float terrainMaxTexDim = 0.0;
@@ -1410,16 +1390,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 
 #		if defined(SNOW_DEFORMATION)
-	// Diagnostic overlay: R = outside deformation window, G = raw
-	// deformation sample, B = detected snowness.
-	[branch] if ((SharedData::snowDeformationSettings.DebugTerrainOverlay & 1) != 0)
-	{
-		float2 debugWorldXY = input.WorldPosition.xy + FrameBuffer::CameraPosAdjust.xy;
-		float2 debugUV = SnowDeformation::GetDeformationUV(debugWorldXY);
-		float debugOutside = (all(debugUV > 0.0) && all(debugUV < 1.0)) ? 0.0 : 1.0;
-		float debugDeformation = SnowDeformation::GetDeformation(debugWorldXY);
-		baseColor.xyz = lerp(baseColor.xyz, float3(debugOutside, debugDeformation, snowDeformationSnowness), 0.75);
-	}
+	SnowDeformation::DebugLandOverlay(baseColor.xyz, input.WorldPosition.xy, input.LandBlendWeights1, input.LandBlendWeights2.xy);
 #		endif
 #	else  // Non-landscape code
 	float4 rawBaseColor;

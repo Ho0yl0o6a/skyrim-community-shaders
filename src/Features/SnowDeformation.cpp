@@ -52,8 +52,10 @@ SnowDeformation::SettingsGPU SnowDeformation::GetCommonBufferData(bool a_inWorld
 {
 	// Advance the window once per frame and only from the in-world upload:
 	// reflection/early uploads carry probe cameras that must not steer it.
+	// Frozen while disabled so the map and its origin stay in step; the first
+	// frame back scrolls by the whole gap.
 	static Util::FrameChecker frameChecker;
-	if (a_inWorld && frameChecker.IsNewFrame()) {
+	if (a_inWorld && settings.EnableSnowDeformation && frameChecker.IsNewFrame()) {
 		// Snap to whole texels so scrolling never resamples the map. The
 		// cached FrameBuffer camera position is what the lighting pixel
 		// shader sees as CameraPosAdjust, so map and terrain agree.
@@ -110,6 +112,10 @@ void SnowDeformation::Prepass()
 	if (ui && ui->GameIsPaused())
 		return;
 
+	// Before the scroll is consumed.
+	if (!GetDeformationUpdateCS())
+		return;
+
 	PerFrame perFrameData{};
 
 	// The window origin was advanced in GetCommonBufferData (during
@@ -150,7 +156,7 @@ void SnowDeformation::Prepass()
 		ID3D11UnorderedAccessView* uavs[] = { deformationTextures[currentTexture]->uav.get() };
 		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
-		context->CSSetShader(GetDeformationUpdateCS(), nullptr, 0);
+		context->CSSetShader(deformationUpdateCS, nullptr, 0);
 		globals::profiler->BeginPass("SnowDeformation::DeformationUpdate");
 		context->Dispatch(kTextureDim / 8, kTextureDim / 8, 1);
 		globals::profiler->EndPass();
@@ -174,15 +180,20 @@ void SnowDeformation::Prepass()
 
 ID3D11ComputeShader* SnowDeformation::GetDeformationUpdateCS()
 {
-	if (!deformationUpdateCS) {
+	if (!deformationUpdateCS && !deformationUpdateCSFailed) {
 		logger::debug("Compiling DeformationUpdateCS");
 		deformationUpdateCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\SnowDeformation\\DeformationUpdateCS.hlsl", {}, "cs_5_0"));
+		if (!deformationUpdateCS) {
+			deformationUpdateCSFailed = true;
+			logger::error("[SNOW DEFORMATION] DeformationUpdateCS failed to compile, deformation disabled until shaders reload");
+		}
 	}
 	return deformationUpdateCS;
 }
 
 void SnowDeformation::ClearShaderCache()
 {
+	deformationUpdateCSFailed = false;
 	if (deformationUpdateCS)
 		deformationUpdateCS->Release();
 	deformationUpdateCS = nullptr;

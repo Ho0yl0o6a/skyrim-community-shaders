@@ -17,7 +17,7 @@ cbuffer PerFrame : register(b0)
 	float RefillAmount;
 	uint ClearMap;
 
-	float4 Stamps[MAX_STAMPS];     // xy: world pos, z: depth, w: radius
+	float4 Stamps[MAX_STAMPS];     // xy: world pos, z: depth, w: 1 / radius^2
 	float4 StampEnds[MAX_STAMPS];  // xy: previous world pos (capsule segment start)
 }
 
@@ -55,14 +55,14 @@ RWTexture2D<float> CurrentDeformation : register(u0);
 		float segLenSq = dot(seg, seg);
 		float t = segLenSq > 1e-4 ? saturate(dot(worldPos - p0, seg) / segLenSq) : 0.0;
 		float2 delta = worldPos - (p0 + seg * t);
-		float distSq = dot(delta, delta);
-		float radius = Stamps[i].w;
+		// (distance / radius)^2
+		float distNormSq = dot(delta, delta) * Stamps[i].w;
 
-		[branch] if (distSq < radius * radius)
+		[branch] if (distNormSq < 1.0)
 		{
 			// Falloff from 0.2 of the radius keeps a wide edge band, so
 			// coarser consumers of the map can still represent trench walls.
-			float falloff = 1.0 - smoothstep(0.2, 1.0, sqrt(distSq) / radius);
+			float falloff = 1.0 - smoothstep(0.2, 1.0, sqrt(distNormSq));
 			deformation = max(deformation, Stamps[i].z * falloff);
 		}
 	}
