@@ -156,6 +156,11 @@ protected:
 	DirectX::XMINT2 pendingScrollDelta = { 0, 0 };
 	bool clearRequested = true;
 
+	/** @brief Smallest refill applied in one dispatch: two R16F steps just below 1.0, so it always moves a stored value. */
+	static constexpr float kRefillStep = 1.0f / 1024.0f;
+	/** @brief Refill accumulated since the last dispatch that applied any. */
+	float refillBank = 0.0f;
+
 	// ---- Runtime render-distance state (driven by the Range* settings) ----
 	/** @brief Deformation window world size (2x the Trenches range). Changing it clears the map. */
 	float deformWorldSize = 14000.0f;

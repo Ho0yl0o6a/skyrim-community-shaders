@@ -134,7 +134,15 @@ void SnowDeformation::Prepass()
 		if (auto* sky = RE::Sky::GetSingleton())
 			if (auto* weather = sky->currentWeather)
 				refillActive = weather->data.flags.any(RE::TESWeather::WeatherDataFlag::kSnow);
-	perFrameData.RefillAmount = (refillActive && settings.RefillTime > 0.0f) ? deltaTime / settings.RefillTime : 0.0f;
+	// A frame's refill (~1e-5 of full depth) is below what the R16F map stores
+	// near full depth and would round back every frame, so it is banked and
+	// spent in steps the map can hold.
+	refillBank += (refillActive && settings.RefillTime > 0.0f) ? deltaTime / settings.RefillTime : 0.0f;
+	perFrameData.RefillAmount = 0.0f;
+	if (refillBank >= kRefillStep) {
+		perFrameData.RefillAmount = refillBank;
+		refillBank = 0.0f;
+	}
 
 	perFrameData.ClearMap = clearRequested;
 	clearRequested = false;
