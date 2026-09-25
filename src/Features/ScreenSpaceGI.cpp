@@ -623,7 +623,9 @@ void ScreenSpaceGI::DrawSSGI()
 	auto imageSpaceManager = globals::game::imageSpaceManager;
 	auto& BSImagespaceShaderISSAOBlurH = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISSAOBlurH;
 
-	BSImagespaceShaderISSAOBlurH->enableSAO = settings.EnableVanillaSSAO;
+	// Toggle vanilla SSAO
+	if (BSImagespaceShaderISSAOBlurH)
+		BSImagespaceShaderISSAOBlurH->enableSAO = settings.EnableVanillaSSAO;
 
 	const bool useSH = settings.EnableGI && settings.EnableSH;
 	const bool trackMultiBounce = settings.EnableGI && settings.EnableMultiBounce;

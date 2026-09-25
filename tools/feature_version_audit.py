@@ -220,9 +220,6 @@ def get_feature_ini_metadata(feature_dir_or_ini_path):
             'description': section_items.get('nexusdescription') or section_items.get('nexus_description') or section_items.get('description'),
             'artifact_pattern': section_items.get('nexusartifactpattern') or section_items.get('nexus_artifact_pattern') or section_items.get('artifact_pattern'),
             'short_name': section_items.get('shortname') or section_items.get('short_name') or section_items.get('nexusshortname') or section_items.get('nexus_short_name'),
-            # Manual override for mods whose Nexus page has more than one MAIN-category
-            # file, where auto-resolution by "most recently uploaded" is ambiguous.
-            'file_id': section_items.get('nexusfileid') or section_items.get('nexus_file_id'),
         }
         metadata.update({k: v for k, v in section_metadata.items() if v is not None and v != ""})
         key_features = section_items.get('nexuskeyfeatures') or section_items.get('nexus_key_features') or section_items.get('key_features') or section_items.get('keyfeatures')
@@ -843,7 +840,7 @@ def analyze_features(FEATURES_DIR, feature_meta_map, base_ref, only_changed=Fals
         commit_link = ""
         if bump_commit:
             author_str = f" ({bump_author})" if bump_author else ""
-            commit_link = f"[link](https://github.com/doodlum/skyrim-community-shaders/commit/{bump_commit}){author_str}"
+            commit_link = f"[link](https://github.com/community-shaders/skyrim-community-shaders/commit/{bump_commit}){author_str}"
 
         def bold(val):
             return f"**{val}**" if is_attention and val != '' and val != '-' else val
@@ -934,7 +931,7 @@ def format_new_features_table(new_features, feature_meta_map, get_commit_author,
             nexus_link = f"[Nexus]({meta['mod_link']})" if meta and meta['mod_link'] else ("**Missing metadata**" if not meta else "")
             author = get_commit_author(commit) if commit else None
             author_str = f" ({author})" if author else ""
-            commit_link = f"[link](https://github.com/doodlum/skyrim-community-shaders/commit/{commit}){author_str}" if commit else ""
+            commit_link = f"[link](https://github.com/community-shaders/skyrim-community-shaders/commit/{commit}){author_str}" if commit else ""
             lines.append(f"| {boldmeta(name)} | {boldmeta(ver)} | {nexus_link} | {commit_link} |")
     return lines
 
@@ -1099,8 +1096,6 @@ def build_nexus_upload_matrix(feature_metadata, core_mod_id, core_filename, core
         }
         if mod_version:
             row['mod_version'] = mod_version
-        if ini_metadata.get('file_id'):
-            row['file_id'] = ini_metadata['file_id']
         if base_ref:
             feature_dir = find_feature_dir(name) or FEATURES_DIR / name
             changelog = get_feature_changelog(feature_dir, info, base_ref)
