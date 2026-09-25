@@ -204,9 +204,11 @@ namespace SharedData
 		float EnvIBLSaturation;
 		float SkyIBLSaturation;
 		float FogAmount;
-		uint DALCMode;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
-		float pad0;
-		float pad1;
+		uint DALCMode;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky
+		uint SkylightingAffectsEnv;
+		uint EnableReflectionFallback;
+		float ReflectionFallbackDistance;
+		float3 pad0;
 	};
 
 	struct ExtendedTranslucencySettings
@@ -295,6 +297,22 @@ namespace SharedData
 		uint3 _padding;
 	};
 
+	struct SSGISettings
+	{
+		uint Enabled;
+		uint EnableIL;
+		uint DebugMode;
+		float AOPower;
+	};
+
+	struct SSRSettings
+	{
+		uint Enabled;
+		float SpecularMult;
+		float SpecCubemapMult;
+		uint pad0;
+	};
+
 	struct ExponentialHeightFogSettings
 	{
 		uint enabled;
@@ -372,6 +390,8 @@ namespace SharedData
 		ExponentialHeightFogSettings exponentialHeightFogSettings;
 		TruePBRSettings truePBRSettings;
 		SkinData skinData;
+		SSGISettings ssgiSettings;
+		SSRSettings ssrSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);
